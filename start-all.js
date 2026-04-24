@@ -63,7 +63,7 @@ async function main() {
 
     await runEngine('达尔文进化引擎', 'evolution-engine.js');
     await runEngine('繁衍中枢', 'brain-engine.js');
-    await runEngine('自动化渲染工厂', 'auto-director.js');
+    await runEngine('矩阵中枢混剪工厂', 'feishu-engine.js');
 
     writeLog('======== 全线完工：各模块已顺序执行完毕 ========');
     console.log('\n🎊 [全线完工] 今日份视频已全部产出并登记在飞书，请查收！');
