@@ -2,24 +2,36 @@ const { MsEdgeTTS, OUTPUT_FORMAT } = require("msedge-tts");
 const fs = require('fs');
 const path = require('path');
 const { pipeline } = require('stream/promises');
+const xlsx = require('xlsx');
 
 // ================= 配置区 =================
-// 抖音带货最爱用的两个声音：
-// 女声：zh-CN-XiaoxiaoNeural (温柔清晰，适合防晒/颜值类)
-// 男声：zh-CN-YunxiNeural (阳光活力，适合剧情/极客类)
+// 女声：zh-CN-XiaoxiaoNeural | 男声：zh-CN-YunxiNeural
 const VOICE_NAME = "zh-CN-XiaoxiaoNeural";
 
-// 模拟上一步 AI 生成的文案数据 (实际业务中你可以从 JSON 或 Excel 中读取)
-const scriptsData = [
-    { version: "audio_A", content: "千万别怪我没提醒你！这几天的紫外线简直能把人烤脱皮！不想被晒出红血丝和光老化，出门必须把脸给我捂严实了..." },
-    { version: "audio_B", content: "每天早起骑小电驴通勤的姐妹看过来！迎着刺骨的冷风，普通口罩根本不顶用，冷风直往脖子里灌。直到我换了这款..." },
-    { version: "audio_C", content: "你去美容院做一次光电项目要多少钱？起码大几千吧！但是今天，一杯奶茶的钱，就能买到硬核的物理防晒屏障..." }
-];
-
-// 创建音频存放目录
+const EXCEL_PATH = path.join(__dirname, 'generated_scripts.xlsx');
 const AUDIO_DIR = path.join(__dirname, 'audio_assets');
+
 if (!fs.existsSync(AUDIO_DIR)) {
     fs.mkdirSync(AUDIO_DIR, { recursive: true });
+}
+
+let scriptsData = [];
+if (fs.existsSync(EXCEL_PATH)) {
+    const workbook = xlsx.readFile(EXCEL_PATH);
+    const sheetName = workbook.SheetNames[0];
+    const rawData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+    scriptsData = rawData.map((row, i) => ({
+        version: row.version || `audio_${i}`,
+        content: [row.hook, row.content, row.callToAction].filter(Boolean).join(' ')
+    }));
+} else {
+    console.error('⚠️ [致命错误] 未找到 generated_scripts.xlsx！请先运行 content-engine.js。');
+    process.exit(1);
+}
+
+if (scriptsData.length === 0) {
+    console.error('⚠️ [致命错误] generated_scripts.xlsx 中没有脚本行，请先运行 content-engine.js。');
+    process.exit(1);
 }
 // ==========================================
 

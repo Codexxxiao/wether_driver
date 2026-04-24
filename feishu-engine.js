@@ -188,9 +188,16 @@ async function startV3Engine() {
                 console.log(`🎬 发现新任务: [${videoName}]`);
 
                 const outputName = `${videoName}_成片.mp4`;
-                const audioName = 'audio_A.mp3';
 
                 try {
+                    const availableAudios = fs.readdirSync(AUDIO_DIR).filter((file) => file.endsWith('.mp3'));
+                    if (availableAudios.length === 0) {
+                        throw new Error('⚠️ audio_assets 文件夹中没有任何 mp3 配音，无法渲染！');
+                    }
+                    const randomIndex = Math.floor(Math.random() * availableAudios.length);
+                    const audioName = availableAudios[randomIndex];
+                    console.log(`   🎤 本次混剪随机抽取的音频剧本为: [${audioName}]`);
+
                     const hookPath = await resolveCellToVideoPath(hook, 'hook', runKey);
                     const prodPath = await resolveCellToVideoPath(product, 'product', runKey);
                     const scenePath = await resolveCellToVideoPath(scene, 'scene', runKey);

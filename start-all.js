@@ -58,6 +58,9 @@ async function main() {
     console.log('🌟 气象驱动分发引擎 V1.0 - 全自动流水线启动');
     console.log('==========================================');
 
+    await runEngine('AI 编剧中心', 'content-engine.js');
+    await runEngine('AI 配音工厂', 'audio-engine.js');
+
     await runEngine('达尔文进化引擎', 'evolution-engine.js');
     await runEngine('繁衍中枢', 'brain-engine.js');
     await runEngine('自动化渲染工厂', 'auto-director.js');
