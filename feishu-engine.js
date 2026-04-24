@@ -20,8 +20,10 @@ const AUDIO_DIR = path.join(__dirname, 'audio_assets');
 const OUTPUT_DIR = path.join(__dirname, 'output');
 const EXCEL_PATH = path.join(__dirname, 'generated_scripts.xlsx');
 const FEISHU_DL_DIR = path.join(OUTPUT_DIR, '_feishu_attachments');
+const BGM_DIR = path.join(__dirname, 'bgm_assets');
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 if (!fs.existsSync(FEISHU_DL_DIR)) fs.mkdirSync(FEISHU_DL_DIR, { recursive: true });
+if (!fs.existsSync(BGM_DIR)) fs.mkdirSync(BGM_DIR, { recursive: true });
 
 /**
  * 解析单元格：纯字符串视为 assets 下文件名；飞书附件数组则取 fileToken 下载
@@ -200,15 +202,16 @@ function fadeOutStart(segDurSec) {
 }
 
 /**
- * 高阶渲染（原速口播版 + 自动 SRT 烧录）
+ * 高阶渲染（原速口播 + 自动 SRT 烧录 + BGM 混音）
  * 淡入淡出衔接 + 统一 1080×1920 + 随机缩放/色彩微调（防去重）
- * 音频不拉伸；-shortest = min(拼接视频时长, 口播时长)
+ * 主口播不拉伸；口播与 BGM 经 amix 混合；-shortest 与成片等长对齐
  */
-async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName, scriptText, outputName) {
+async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName, bgmName, scriptText, outputName) {
     const hookPathF = toFfmpegPath(hookPath);
     const prodPathF = toFfmpegPath(productPath);
     const scenePathF = toFfmpegPath(scenePath);
     const audioPath = path.join(AUDIO_DIR, audioName);
+    const bgmPath = path.join(BGM_DIR, bgmName);
     const outputPath = path.join(OUTPUT_DIR, outputName);
     const tempSrtPath = path.join(OUTPUT_DIR, `temp_${Date.now()}.srt`);
 
@@ -234,14 +237,15 @@ async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName
     console.log(`   📐 视频素材总时长约 ${targetSec.toFixed(2)}s，口播原长约 ${audioDur.toFixed(2)}s`);
     console.log('   🎤 【原速口播】不做 atempo 拉伸，成片时长 = min(拼接视频, 音频)（-shortest）');
     console.log(`   🛡️ 防去重 -> 缩放: ${zoom}x | 对比度: ${contrast} | 亮度: ${brightness} | 饱和度: ${saturation}`);
-    console.log('   ⏳ 高阶渲染（淡入淡出 + 调色 + 动态字幕 + x264）进行中…');
+    console.log('   ⏳ 高阶渲染（淡入淡出 + 调色 + 动态字幕 + BGM 混音 + x264）进行中…');
 
     const filterComplex = [
         `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${fadeOutStart(hookDur)}:d=0.2,format=yuv420p,fps=30[v0]`,
         `[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${fadeOutStart(prodDur)}:d=0.2,format=yuv420p,fps=30[v1]`,
         `[2:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${fadeOutStart(sceneDur)}:d=0.2,format=yuv420p,fps=30[v2]`,
         `[v0][v1][v2]concat=n=3:v=1:a=0[concat_v]`,
-        `[concat_v]eq=contrast=${contrast}:brightness=${brightness}:saturation=${saturation},scale=iw*${zoom}:ih*${zoom},crop=1080:1920,subtitles='${srtPathF}':force_style='${subtitleStyle}'[out_v]`
+        `[concat_v]eq=contrast=${contrast}:brightness=${brightness}:saturation=${saturation},scale=iw*${zoom}:ih*${zoom},crop=1080:1920,subtitles='${srtPathF}':force_style='${subtitleStyle}'[out_v]`,
+        `[3:a]aformat=sample_fmts=fltp:channel_layouts=stereo[voice_f];[4:a]volume=0.15,aformat=sample_fmts=fltp:channel_layouts=stereo[bgm_f];[voice_f][bgm_f]amix=inputs=2:duration=first:dropout_transition=2[out_a]`
     ].join(';');
 
     try {
@@ -251,12 +255,13 @@ async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName
                 .input(prodPathF)
                 .input(scenePathF)
                 .input(audioPath)
+                .input(bgmPath)
                 .complexFilter(filterComplex)
                 .outputOptions([
                     '-map',
                     '[out_v]',
                     '-map',
-                    '3:a:0',
+                    '[out_a]',
                     '-c:v',
                     'libx264',
                     '-preset',
@@ -388,11 +393,18 @@ async function startV3Engine() {
                     console.log(`   🎤 匹配音频: [${audioName}]`);
                     console.log(`   📜 提取文案: [${preview}]`);
 
+                    const availableBgms = fs.readdirSync(BGM_DIR).filter((file) => file.endsWith('.mp3'));
+                    if (availableBgms.length === 0) {
+                        throw new Error('⚠️ bgm_assets 文件夹是空的，请至少放入一首背景音乐！');
+                    }
+                    const bgmName = availableBgms[Math.floor(Math.random() * availableBgms.length)];
+                    console.log(`   🎵 匹配背景音乐: [${bgmName}]`);
+
                     const hookPath = await resolveCellToVideoPath(hook, 'hook', runKey);
                     const prodPath = await resolveCellToVideoPath(product, 'product', runKey);
                     const scenePath = await resolveCellToVideoPath(scene, 'scene', runKey);
 
-                    await mixThreeClipsAndAudio(hookPath, prodPath, scenePath, audioName, scriptText, outputName);
+                    await mixThreeClipsAndAudio(hookPath, prodPath, scenePath, audioName, bgmName, scriptText, outputName);
                     console.log(`   ✅ 视频 [${outputName}] 渲染完成！`);
 
                     const outAbs = path.join(OUTPUT_DIR, outputName);
