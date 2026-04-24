@@ -1,6 +1,7 @@
 require('./lib/load-env');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
+const { spawnSync } = require('child_process');
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 const path = require('path');
 const fs = require('fs');
@@ -71,44 +72,130 @@ function toFfmpegPath(absPath) {
     return absPath.replace(/\\/g, '/');
 }
 
-/**
- * 三段视频绝对路径 + 配音文件名 → 输出成片
- */
-function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName, outputName) {
-    return new Promise((resolve, reject) => {
-        const hookPathF = toFfmpegPath(hookPath);
-        const prodPathF = toFfmpegPath(productPath);
-        const scenePathF = toFfmpegPath(scenePath);
-        const audioPath = path.join(AUDIO_DIR, audioName);
-        const outputPath = path.join(OUTPUT_DIR, outputName);
+/** 用 ffmpeg -i 解析媒体时长（秒），不依赖 ffprobe */
+function getMediaDurationSeconds(filePath) {
+    const r = spawnSync(
+        ffmpegInstaller.path,
+        ['-hide_banner', '-i', filePath, '-f', 'null', '-'],
+        { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 }
+    );
+    const stderr = r.stderr || '';
+    const m = /Duration:\s*(\d{2}):(\d{2}):(\d{2}\.\d+)/.exec(stderr);
+    if (!m) {
+        throw new Error(`无法解析媒体时长: ${filePath}`);
+    }
+    const h = parseInt(m[1], 10);
+    const min = parseInt(m[2], 10);
+    const sec = parseFloat(m[3]);
+    return h * 3600 + min * 60 + sec;
+}
 
-        const tempTxtPath = path.join(OUTPUT_DIR, `concat_${Date.now()}.txt`);
-        const txtContent = `file '${hookPathF}'\nfile '${prodPathF}'\nfile '${scenePathF}'`;
-        fs.writeFileSync(tempTxtPath, txtContent);
+/**
+ * 使 atempo 链的乘积等于 r（输出时长 = 输入 / 乘积），从而把 D 秒口播缩放到 T 秒需 r = D/T
+ */
+function atempoFactorsForRatio(r) {
+    const factors = [];
+    const EPS = 1e-5;
+    while (r > 2 + EPS) {
+        factors.push(2);
+        r /= 2;
+    }
+    while (r < 0.5 - EPS) {
+        factors.push(0.5);
+        r /= 0.5;
+    }
+    if (r < 1 - EPS || r > 1 + EPS) {
+        factors.push(Number(Math.min(2, Math.max(0.5, r)).toFixed(5)));
+    }
+    return factors;
+}
+
+function buildAudioFitFilter(audioDur, targetSec) {
+    if (targetSec <= 0) {
+        throw new Error('目标视频时长无效');
+    }
+    if (audioDur <= 0) {
+        throw new Error('口播时长无效');
+    }
+    const r = audioDur / targetSec;
+    const parts = [];
+    if (Math.abs(r - 1) > 0.005) {
+        for (const f of atempoFactorsForRatio(r)) {
+            parts.push(`atempo=${f}`);
+        }
+    }
+    parts.push(`atrim=0:${targetSec.toFixed(3)}`);
+    parts.push('asetpts=PTS-STARTPTS');
+    return parts.join(',');
+}
+
+function adjustAudioDurationToFile(audioPath, targetSec, outPath) {
+    const audioDur = getMediaDurationSeconds(audioPath);
+    const filter = buildAudioFitFilter(audioDur, targetSec);
+    return new Promise((resolve, reject) => {
+        ffmpeg(audioPath)
+            .audioFilters(filter)
+            .audioCodec('aac')
+            .noVideo()
+            .format('ipod')
+            .on('end', () => resolve())
+            .on('error', (err) => reject(err))
+            .save(outPath);
+    });
+}
+
+/**
+ * 三段视频绝对路径 + 配音文件名 → 输出成片（口播时长对齐拼接后视频总时长）
+ */
+async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName, outputName) {
+    const hookPathF = toFfmpegPath(hookPath);
+    const prodPathF = toFfmpegPath(productPath);
+    const scenePathF = toFfmpegPath(scenePath);
+    const audioPath = path.join(AUDIO_DIR, audioName);
+    const outputPath = path.join(OUTPUT_DIR, outputName);
+
+    const targetSec =
+        getMediaDurationSeconds(hookPath) +
+        getMediaDurationSeconds(productPath) +
+        getMediaDurationSeconds(scenePath);
+
+    const audioDur = getMediaDurationSeconds(audioPath);
+    console.log(
+        `   📐 视频总时长约 ${targetSec.toFixed(2)}s，口播原长 ${audioDur.toFixed(2)}s，将对齐口播后混流`
+    );
+
+    const tempTxtPath = path.join(OUTPUT_DIR, `concat_${Date.now()}.txt`);
+    const tempAudioPath = path.join(OUTPUT_DIR, `_fit_audio_${Date.now()}.m4a`);
+    const txtContent = `file '${hookPathF}'\nfile '${prodPathF}'\nfile '${scenePathF}'`;
+    fs.writeFileSync(tempTxtPath, txtContent);
+
+    try {
+        await adjustAudioDurationToFile(audioPath, targetSec, tempAudioPath);
 
         console.log(`   ⏳ 正在进行底层拼接轨道的像素级对齐...`);
 
-        ffmpeg()
-            .input(tempTxtPath)
-            .inputOptions(['-f concat', '-safe 0'])
-            .input(audioPath)
-            .outputOptions([
-                '-map 0:v:0',
-                '-map 1:a:0',
-                '-c:v copy',
-                '-c:a aac',
-                '-shortest'
-            ])
-            .on('end', () => {
-                if (fs.existsSync(tempTxtPath)) fs.unlinkSync(tempTxtPath);
-                resolve(outputName);
-            })
-            .on('error', (err) => {
-                if (fs.existsSync(tempTxtPath)) fs.unlinkSync(tempTxtPath);
-                reject(err);
-            })
-            .save(outputPath);
-    });
+        await new Promise((resolve, reject) => {
+            ffmpeg()
+                .input(tempTxtPath)
+                .inputOptions(['-f concat', '-safe 0'])
+                .input(tempAudioPath)
+                .outputOptions([
+                    '-map 0:v:0',
+                    '-map 1:a:0',
+                    '-c:v copy',
+                    '-c:a aac',
+                    '-shortest'
+                ])
+                .on('end', () => resolve())
+                .on('error', (err) => reject(err))
+                .save(outputPath);
+        });
+    } finally {
+        if (fs.existsSync(tempTxtPath)) fs.unlinkSync(tempTxtPath);
+        if (fs.existsSync(tempAudioPath)) fs.unlinkSync(tempAudioPath);
+    }
+
+    return outputName;
 }
 
 /**
