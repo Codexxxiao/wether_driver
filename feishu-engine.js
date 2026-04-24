@@ -80,13 +80,13 @@ function getMediaDurationSeconds(filePath) {
         { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 }
     );
     const stderr = r.stderr || '';
-    const m = /Duration:\s*(\d{2}):(\d{2}):(\d{2}\.\d+)/.exec(stderr);
+    const m = /Duration:\s*(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?/.exec(stderr);
     if (!m) {
         throw new Error(`无法解析媒体时长: ${filePath}`);
     }
     const h = parseInt(m[1], 10);
     const min = parseInt(m[2], 10);
-    const sec = parseFloat(m[3]);
+    const sec = m[4] != null && m[4] !== '' ? parseFloat(`${m[3]}.${m[4]}`) : parseFloat(m[3]);
     return h * 3600 + min * 60 + sec;
 }
 
@@ -144,8 +144,15 @@ function adjustAudioDurationToFile(audioPath, targetSec, outPath) {
     });
 }
 
+/** 淡出起点：避免片段短于 0.2s 时 st 为负 */
+function fadeOutStart(segDurSec) {
+    return Math.max(0, segDurSec - 0.2).toFixed(2);
+}
+
 /**
- * 三段视频绝对路径 + 配音文件名 → 输出成片（口播时长对齐拼接后视频总时长）
+ * 高阶渲染（原速口播版）
+ * 淡入淡出衔接 + 统一 1080×1920 + 随机缩放/色彩微调（防去重）
+ * 音频不拉伸；-shortest = min(拼接视频时长, 口播时长)
  */
 async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName, outputName) {
     const hookPathF = toFfmpegPath(hookPath);
@@ -154,46 +161,50 @@ async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName
     const audioPath = path.join(AUDIO_DIR, audioName);
     const outputPath = path.join(OUTPUT_DIR, outputName);
 
-    const targetSec =
-        getMediaDurationSeconds(hookPath) +
-        getMediaDurationSeconds(productPath) +
-        getMediaDurationSeconds(scenePath);
-
+    const hookDur = getMediaDurationSeconds(hookPath);
+    const prodDur = getMediaDurationSeconds(productPath);
+    const sceneDur = getMediaDurationSeconds(scenePath);
+    const targetSec = hookDur + prodDur + sceneDur;
     const audioDur = getMediaDurationSeconds(audioPath);
-    console.log(
-        `   📐 视频总时长约 ${targetSec.toFixed(2)}s，口播原长 ${audioDur.toFixed(2)}s，将对齐口播后混流`
-    );
 
-    const tempTxtPath = path.join(OUTPUT_DIR, `concat_${Date.now()}.txt`);
-    const tempAudioPath = path.join(OUTPUT_DIR, `_fit_audio_${Date.now()}.m4a`);
-    const txtContent = `file '${hookPathF}'\nfile '${prodPathF}'\nfile '${scenePathF}'`;
-    fs.writeFileSync(tempTxtPath, txtContent);
+    const contrast = (Math.random() * 0.1 + 0.95).toFixed(2);
+    const brightness = (Math.random() * 0.04 - 0.02).toFixed(2);
+    const saturation = (Math.random() * 0.2 + 0.9).toFixed(2);
+    const zoom = (Math.random() * 0.04 + 1.01).toFixed(3);
 
-    try {
-        await adjustAudioDurationToFile(audioPath, targetSec, tempAudioPath);
+    console.log(`   📐 视频素材总时长约 ${targetSec.toFixed(2)}s，口播原长约 ${audioDur.toFixed(2)}s`);
+    console.log('   🎤 【原速口播】不做 atempo 拉伸，成片时长 = min(拼接视频, 音频)（-shortest）');
+    console.log(`   🛡️ 防去重 -> 缩放: ${zoom}x | 对比度: ${contrast} | 亮度: ${brightness} | 饱和度: ${saturation}`);
+    console.log('   ⏳ 高阶渲染（淡入淡出 + 调色 + x264）进行中…');
 
-        console.log(`   ⏳ 正在进行底层拼接轨道的像素级对齐...`);
+    const filterComplex = [
+        `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${fadeOutStart(hookDur)}:d=0.2,format=yuv420p,fps=30[v0]`,
+        `[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${fadeOutStart(prodDur)}:d=0.2,format=yuv420p,fps=30[v1]`,
+        `[2:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${fadeOutStart(sceneDur)}:d=0.2,format=yuv420p,fps=30[v2]`,
+        `[v0][v1][v2]concat=n=3:v=1:a=0[concat_v]`,
+        `[concat_v]eq=contrast=${contrast}:brightness=${brightness}:saturation=${saturation},scale=iw*${zoom}:ih*${zoom},crop=1080:1920[out_v]`
+    ].join(';');
 
-        await new Promise((resolve, reject) => {
-            ffmpeg()
-                .input(tempTxtPath)
-                .inputOptions(['-f concat', '-safe 0'])
-                .input(tempAudioPath)
-                .outputOptions([
-                    '-map 0:v:0',
-                    '-map 1:a:0',
-                    '-c:v copy',
-                    '-c:a aac',
-                    '-shortest'
-                ])
-                .on('end', () => resolve())
-                .on('error', (err) => reject(err))
-                .save(outputPath);
-        });
-    } finally {
-        if (fs.existsSync(tempTxtPath)) fs.unlinkSync(tempTxtPath);
-        if (fs.existsSync(tempAudioPath)) fs.unlinkSync(tempAudioPath);
-    }
+    await new Promise((resolve, reject) => {
+        ffmpeg()
+            .input(hookPathF)
+            .input(prodPathF)
+            .input(scenePathF)
+            .input(audioPath)
+            .complexFilter(filterComplex)
+            .outputOptions([
+                '-map', '[out_v]',
+                '-map', '3:a:0',
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-crf', '23',
+                '-c:a', 'aac',
+                '-shortest'
+            ])
+            .on('end', () => resolve())
+            .on('error', (err) => reject(err))
+            .save(outputPath);
+    });
 
     return outputName;
 }
