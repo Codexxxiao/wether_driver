@@ -6,6 +6,7 @@ ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 const path = require('path');
 const fs = require('fs');
 const axios = require('axios');
+const xlsx = require('xlsx');
 
 const client = require('./lib/feishu-client');
 const { SPREADSHEET_TOKEN, TASKS_SHEET_ID } = require('./lib/feishu-config');
@@ -17,6 +18,7 @@ const SHEET_ID = TASKS_SHEET_ID;
 const ASSETS_DIR = path.join(__dirname, 'assets');
 const AUDIO_DIR = path.join(__dirname, 'audio_assets');
 const OUTPUT_DIR = path.join(__dirname, 'output');
+const EXCEL_PATH = path.join(__dirname, 'generated_scripts.xlsx');
 const FEISHU_DL_DIR = path.join(OUTPUT_DIR, '_feishu_attachments');
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 if (!fs.existsSync(FEISHU_DL_DIR)) fs.mkdirSync(FEISHU_DL_DIR, { recursive: true });
@@ -72,6 +74,46 @@ function toFfmpegPath(absPath) {
     return absPath.replace(/\\/g, '/');
 }
 
+/** Windows 下 FFmpeg subtitles 滤镜对路径的解析：/ 与盘符冒号转义 */
+function toSubtitlePath(absPath) {
+    let p = absPath.replace(/\\/g, '/');
+    return p.replace(':', '\\:');
+}
+
+function formatSrtTime(seconds) {
+    const d = new Date(seconds * 1000);
+    const hh = String(d.getUTCHours()).padStart(2, '0');
+    const mm = String(d.getUTCMinutes()).padStart(2, '0');
+    const ss = String(d.getUTCSeconds()).padStart(2, '0');
+    const ms = String(d.getUTCMilliseconds()).padStart(3, '0');
+    return `${hh}:${mm}:${ss},${ms}`;
+}
+
+/** 按标点切句并按字长比例铺到 totalDuration，生成 SRT */
+function generateSrtFile(text, totalDuration, outputPath) {
+    const segments = text.split(/([，。！？、])/).filter(Boolean);
+    let phrases = [];
+    for (let i = 0; i < segments.length; i += 2) {
+        phrases.push(segments[i] + (segments[i + 1] || ''));
+    }
+    phrases = phrases.filter((p) => p.trim().length > 0);
+    if (phrases.length === 0) {
+        const one = (text && String(text).trim()) || ' ';
+        phrases = [one];
+    }
+    const totalChars = phrases.reduce((sum, p) => sum + p.length, 0) || 1;
+    let currentTime = 0;
+    let srtContent = '';
+    phrases.forEach((phrase, index) => {
+        const duration = (phrase.length / totalChars) * totalDuration;
+        const startTime = formatSrtTime(currentTime);
+        currentTime += duration;
+        const endTime = formatSrtTime(currentTime);
+        srtContent += `${index + 1}\n${startTime} --> ${endTime}\n${phrase.trim()}\n\n`;
+    });
+    fs.writeFileSync(outputPath, srtContent, 'utf8');
+}
+
 /** 用 ffmpeg -i 解析媒体时长（秒），不依赖 ffprobe */
 function getMediaDurationSeconds(filePath) {
     const r = spawnSync(
@@ -88,6 +130,14 @@ function getMediaDurationSeconds(filePath) {
     const min = parseInt(m[2], 10);
     const sec = m[4] != null && m[4] !== '' ? parseFloat(`${m[3]}.${m[4]}`) : parseFloat(m[3]);
     return h * 3600 + min * 60 + sec;
+}
+
+function getMediaDurationSecondsOr(filePath, fallbackSec) {
+    try {
+        return getMediaDurationSeconds(filePath);
+    } catch {
+        return fallbackSec;
+    }
 }
 
 /**
@@ -150,61 +200,84 @@ function fadeOutStart(segDurSec) {
 }
 
 /**
- * 高阶渲染（原速口播版）
+ * 高阶渲染（原速口播版 + 自动 SRT 烧录）
  * 淡入淡出衔接 + 统一 1080×1920 + 随机缩放/色彩微调（防去重）
  * 音频不拉伸；-shortest = min(拼接视频时长, 口播时长)
  */
-async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName, outputName) {
+async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName, scriptText, outputName) {
     const hookPathF = toFfmpegPath(hookPath);
     const prodPathF = toFfmpegPath(productPath);
     const scenePathF = toFfmpegPath(scenePath);
     const audioPath = path.join(AUDIO_DIR, audioName);
     const outputPath = path.join(OUTPUT_DIR, outputName);
+    const tempSrtPath = path.join(OUTPUT_DIR, `temp_${Date.now()}.srt`);
 
     const hookDur = getMediaDurationSeconds(hookPath);
     const prodDur = getMediaDurationSeconds(productPath);
     const sceneDur = getMediaDurationSeconds(scenePath);
     const targetSec = hookDur + prodDur + sceneDur;
-    const audioDur = getMediaDurationSeconds(audioPath);
+    const audioDur = getMediaDurationSecondsOr(audioPath, targetSec);
+    // 与 -shortest 成片时长一致，避免字幕时间轴长于实际画面
+    const srtDuration = Math.max(0.1, Math.min(audioDur, targetSec));
+
+    generateSrtFile(scriptText, srtDuration, tempSrtPath);
+    const srtPathF = toSubtitlePath(tempSrtPath);
 
     const contrast = (Math.random() * 0.1 + 0.95).toFixed(2);
     const brightness = (Math.random() * 0.04 - 0.02).toFixed(2);
     const saturation = (Math.random() * 0.2 + 0.9).toFixed(2);
     const zoom = (Math.random() * 0.04 + 1.01).toFixed(3);
 
+    const subtitleStyle =
+        'FontName=Microsoft YaHei,FontSize=22,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=150';
+
     console.log(`   📐 视频素材总时长约 ${targetSec.toFixed(2)}s，口播原长约 ${audioDur.toFixed(2)}s`);
     console.log('   🎤 【原速口播】不做 atempo 拉伸，成片时长 = min(拼接视频, 音频)（-shortest）');
     console.log(`   🛡️ 防去重 -> 缩放: ${zoom}x | 对比度: ${contrast} | 亮度: ${brightness} | 饱和度: ${saturation}`);
-    console.log('   ⏳ 高阶渲染（淡入淡出 + 调色 + x264）进行中…');
+    console.log('   ⏳ 高阶渲染（淡入淡出 + 调色 + 动态字幕 + x264）进行中…');
 
     const filterComplex = [
         `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${fadeOutStart(hookDur)}:d=0.2,format=yuv420p,fps=30[v0]`,
         `[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${fadeOutStart(prodDur)}:d=0.2,format=yuv420p,fps=30[v1]`,
         `[2:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${fadeOutStart(sceneDur)}:d=0.2,format=yuv420p,fps=30[v2]`,
         `[v0][v1][v2]concat=n=3:v=1:a=0[concat_v]`,
-        `[concat_v]eq=contrast=${contrast}:brightness=${brightness}:saturation=${saturation},scale=iw*${zoom}:ih*${zoom},crop=1080:1920[out_v]`
+        `[concat_v]eq=contrast=${contrast}:brightness=${brightness}:saturation=${saturation},scale=iw*${zoom}:ih*${zoom},crop=1080:1920,subtitles='${srtPathF}':force_style='${subtitleStyle}'[out_v]`
     ].join(';');
 
-    await new Promise((resolve, reject) => {
-        ffmpeg()
-            .input(hookPathF)
-            .input(prodPathF)
-            .input(scenePathF)
-            .input(audioPath)
-            .complexFilter(filterComplex)
-            .outputOptions([
-                '-map', '[out_v]',
-                '-map', '3:a:0',
-                '-c:v', 'libx264',
-                '-preset', 'fast',
-                '-crf', '23',
-                '-c:a', 'aac',
-                '-shortest'
-            ])
-            .on('end', () => resolve())
-            .on('error', (err) => reject(err))
-            .save(outputPath);
-    });
+    try {
+        await new Promise((resolve, reject) => {
+            ffmpeg()
+                .input(hookPathF)
+                .input(prodPathF)
+                .input(scenePathF)
+                .input(audioPath)
+                .complexFilter(filterComplex)
+                .outputOptions([
+                    '-map',
+                    '[out_v]',
+                    '-map',
+                    '3:a:0',
+                    '-c:v',
+                    'libx264',
+                    '-preset',
+                    'fast',
+                    '-crf',
+                    '23',
+                    '-c:a',
+                    'aac',
+                    '-shortest'
+                ])
+                .on('end', () => resolve())
+                .on('error', (err) => reject(err))
+                .save(outputPath);
+        });
+    } finally {
+        if (fs.existsSync(tempSrtPath)) {
+            try {
+                fs.unlinkSync(tempSrtPath);
+            } catch { /* ignore */ }
+        }
+    }
 
     return outputName;
 }
@@ -294,13 +367,32 @@ async function startV3Engine() {
                     }
                     const randomIndex = Math.floor(Math.random() * availableAudios.length);
                     const audioName = availableAudios[randomIndex];
-                    console.log(`   🎤 本次混剪随机抽取的音频剧本为: [${audioName}]`);
+                    let scriptText = '夏日出行，防晒神器。';
+                    if (fs.existsSync(EXCEL_PATH)) {
+                        try {
+                            const wb = xlsx.readFile(EXCEL_PATH);
+                            const data = xlsx.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+                            const versionKey = audioName.replace(/\.mp3$/i, '');
+                            const row = data.find((r) => r.version === versionKey);
+                            if (row) {
+                                scriptText = `${row.hook || ''}${row.content || ''}${row.callToAction || ''}`;
+                            }
+                        } catch (e) {
+                            console.error(`   ⚠️ 读取 ${path.basename(EXCEL_PATH)} 失败，使用默认文案: ${e.message}`);
+                        }
+                    }
+                    if (!String(scriptText).trim()) {
+                        scriptText = '夏日出行，防晒神器。';
+                    }
+                    const preview = scriptText.length > 20 ? `${scriptText.slice(0, 20)}...` : scriptText;
+                    console.log(`   🎤 匹配音频: [${audioName}]`);
+                    console.log(`   📜 提取文案: [${preview}]`);
 
                     const hookPath = await resolveCellToVideoPath(hook, 'hook', runKey);
                     const prodPath = await resolveCellToVideoPath(product, 'product', runKey);
                     const scenePath = await resolveCellToVideoPath(scene, 'scene', runKey);
 
-                    await mixThreeClipsAndAudio(hookPath, prodPath, scenePath, audioName, outputName);
+                    await mixThreeClipsAndAudio(hookPath, prodPath, scenePath, audioName, scriptText, outputName);
                     console.log(`   ✅ 视频 [${outputName}] 渲染完成！`);
 
                     const outAbs = path.join(OUTPUT_DIR, outputName);
