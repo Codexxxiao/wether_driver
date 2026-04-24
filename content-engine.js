@@ -17,10 +17,10 @@ const OUTPUT_EXCEL = path.join(__dirname, 'generated_scripts.xlsx');
 // 你的核心商业 Prompt
 const SYSTEM_PROMPT = `
 你是一位年GMV过亿的抖音千川投放总监。请将用户输入的【竞品爆款文案】进行拆解重组。
-要求生成 3 个版本的短视频脚本（150-200字）：
-版本A（恐吓拉扯型）：放大不戴口罩的严重后果（晒黑/冻伤）。
-版本B（场景代入型）：设定具体生活场景引发共鸣。
-版本C（算账省钱型）：从极致性价比切入，对比防晒霜/医美的成本。
+要求生成 3 个版本的【极短】视频脚本，必须严格控制总字数在 55-60 字以内（口播时长控制在 8-9 秒）：
+版本A（恐吓拉扯型）：放大不戴口罩的严重后果（1句话）。
+版本B（场景代入型）：设定具体生活场景引发共鸣（1句话）。
+版本C（算账省钱型）：对比防晒霜/医美的成本（1句话）。
 
 必须严格返回 JSON 格式，结构如下：
 [
@@ -28,8 +28,30 @@ const SYSTEM_PROMPT = `
   { "version": "版本B", "hook": "前3秒钩子", "content": "正文话术", "callToAction": "逼单话术" },
   { "version": "版本C", "hook": "前3秒钩子", "content": "正文话术", "callToAction": "逼单话术" }
 ]
-注意：除了 JSON 数组，不要输出任何其他废话。
+注意：这三部分合并起来的总字数绝对不能超过 60 个字！除了 JSON 数组，不要输出任何其他废话。
 `;
+
+/**
+ * 解析模型输出为脚本数组（支持裸数组、markdown 代码块、或 { scripts: [] } 包装）
+ */
+function parseScriptsJson(resultText) {
+    let raw = String(resultText ?? '').trim();
+    const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fence) {
+        raw = fence[1].trim();
+    }
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+        return parsed;
+    }
+    if (parsed && Array.isArray(parsed.scripts)) {
+        return parsed.scripts;
+    }
+    if (parsed && Array.isArray(parsed.data)) {
+        return parsed.data;
+    }
+    throw new Error('模型返回格式异常：需要 JSON 数组或 { "scripts": [...] }');
+}
 // ==========================================
 
 async function generateScripts() {
@@ -54,12 +76,11 @@ async function generateScripts() {
                 { role: 'system', content: SYSTEM_PROMPT },
                 { role: 'user', content: `待重写文案：\n${sourceText}` }
             ],
-            response_format: { type: "json_object" }, // 强制输出 JSON
             temperature: 0.8 // 稍微高一点，让文案更有创意
         });
 
         const resultText = response.choices[0].message.content;
-        const scriptsArray = JSON.parse(resultText);
+        const scriptsArray = parseScriptsJson(resultText);
 
         // 3. 将结果写入 Excel
         saveToExcel(scriptsArray);

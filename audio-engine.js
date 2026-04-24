@@ -33,6 +33,13 @@ if (scriptsData.length === 0) {
     console.error('⚠️ [致命错误] generated_scripts.xlsx 中没有脚本行，请先运行 content-engine.js。');
     process.exit(1);
 }
+
+function escapeXmlText(s) {
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
 // ==========================================
 
 async function generateBatchAudio() {
@@ -50,8 +57,12 @@ async function generateBatchAudio() {
             console.log(`⏳ 正在合成: ${fileName} ...`);
 
             try {
-                // toStream 返回 { audioStream, metadataStream }，必须对 audioStream 写入
-                const { audioStream } = tts.toStream(item.content);
+                const ssmlText = `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="zh-CN">
+    <voice name="${VOICE_NAME}">
+        <prosody rate="+20%">${escapeXmlText(item.content)}</prosody>
+    </voice>
+</speak>`;
+                const { audioStream } = tts.toStream(ssmlText);
                 const writable = fs.createWriteStream(filePath);
                 await pipeline(audioStream, writable);
 
