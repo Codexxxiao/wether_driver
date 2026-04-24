@@ -229,7 +229,7 @@ async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName
     const zoom = (Math.random() * 0.04 + 1.01).toFixed(3);
 
     const subtitleStyle =
-        'FontName=Microsoft YaHei,FontSize=22,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=150';
+        'FontName=Microsoft YaHei,FontSize=14,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=72';
 
     console.log(`   📐 视频素材总时长约 ${targetSec.toFixed(2)}s，口播原长约 ${audioDur.toFixed(2)}s`);
     console.log('   🎤 【原速口播】不做 atempo 拉伸，成片时长 = min(拼接视频, 音频)（-shortest）');
