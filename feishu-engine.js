@@ -25,6 +25,9 @@ if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 if (!fs.existsSync(FEISHU_DL_DIR)) fs.mkdirSync(FEISHU_DL_DIR, { recursive: true });
 if (!fs.existsSync(BGM_DIR)) fs.mkdirSync(BGM_DIR, { recursive: true });
 
+/** BGM 在混音前的相对音量（0~1）；老版本 FFmpeg 的 amix 无 normalize 选项，靠增益补偿 */
+const BGM_MIX_VOLUME = Number(process.env.BGM_MIX_VOLUME) || 0.38;
+
 /**
  * 解析单元格：纯字符串视为 assets 下文件名；飞书附件数组则取 fileToken 下载
  */
@@ -237,6 +240,7 @@ async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName
     console.log(`   📐 视频素材总时长约 ${targetSec.toFixed(2)}s，口播原长约 ${audioDur.toFixed(2)}s`);
     console.log('   🎤 【原速口播】不做 atempo 拉伸，成片时长 = min(拼接视频, 音频)（-shortest）');
     console.log(`   🛡️ 防去重 -> 缩放: ${zoom}x | 对比度: ${contrast} | 亮度: ${brightness} | 饱和度: ${saturation}`);
+    console.log(`   🎵 BGM 混音增益: ${BGM_MIX_VOLUME}（可用环境变量 BGM_MIX_VOLUME 调整）| amix 兼容版`);
     console.log('   ⏳ 高阶渲染（淡入淡出 + 调色 + 动态字幕 + BGM 混音 + x264）进行中…');
 
     const filterComplex = [
@@ -245,7 +249,7 @@ async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName
         `[2:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${fadeOutStart(sceneDur)}:d=0.2,format=yuv420p,fps=30[v2]`,
         `[v0][v1][v2]concat=n=3:v=1:a=0[concat_v]`,
         `[concat_v]eq=contrast=${contrast}:brightness=${brightness}:saturation=${saturation},scale=iw*${zoom}:ih*${zoom},crop=1080:1920,subtitles='${srtPathF}':force_style='${subtitleStyle}'[out_v]`,
-        `[3:a]aformat=sample_fmts=fltp:channel_layouts=stereo[voice_f];[4:a]volume=0.15,aformat=sample_fmts=fltp:channel_layouts=stereo[bgm_f];[voice_f][bgm_f]amix=inputs=2:duration=first:dropout_transition=2[out_a]`
+        `[3:a]aformat=sample_fmts=fltp:channel_layouts=stereo[voice_f];[4:a]volume=${BGM_MIX_VOLUME},aformat=sample_fmts=fltp:channel_layouts=stereo[bgm_f];[voice_f][bgm_f]amix=inputs=2:duration=first[out_a]`
     ].join(';');
 
     try {
