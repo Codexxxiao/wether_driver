@@ -205,9 +205,9 @@ function fadeOutStart(segDurSec) {
 }
 
 /**
- * 高阶渲染（原速口播 + 自动 SRT 烧录 + BGM 混音）
- * 淡入淡出衔接 + 统一 1080×1920 + 随机缩放/色彩微调（防去重）
- * 主口播不拉伸；口播与 BGM 经 amix 混合；-shortest 与成片等长对齐
+ * 高阶渲染（成片时长=画面总长 + 口播/BGM 与画面对齐 + 动态字幕）
+ * 口播不拉伸：atrim 到 target；短于画面时 anullsrc+concat 补静音（避免旧 FFmpeg 的 apad=pad_dur 不兼容）。长口播截断。
+ * BGM 短于画面则 aloop+atrim 铺满。输出 -t targetSec 固定成片时长。
  */
 async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName, bgmName, scriptText, outputName) {
     const hookPathF = toFfmpegPath(hookPath);
@@ -222,11 +222,13 @@ async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName
     const prodDur = getMediaDurationSeconds(productPath);
     const sceneDur = getMediaDurationSeconds(scenePath);
     const targetSec = hookDur + prodDur + sceneDur;
+    const tStr = Math.max(0.01, targetSec).toFixed(3);
     const audioDur = getMediaDurationSecondsOr(audioPath, targetSec);
-    // 与 -shortest 成片时长一致，避免字幕时间轴长于实际画面
-    const srtDuration = Math.max(0.1, Math.min(audioDur, targetSec));
+    const bgmDur = getMediaDurationSecondsOr(bgmPath, 9999);
 
-    generateSrtFile(scriptText, srtDuration, tempSrtPath);
+    // 字幕只在成片可见区间内铺：口播与画面等长取 min(口播, 画面)
+    const srtVisibleSec = Math.max(0.1, Math.min(audioDur, targetSec));
+    generateSrtFile(scriptText, srtVisibleSec, tempSrtPath);
     const srtPathF = toSubtitlePath(tempSrtPath);
 
     const contrast = (Math.random() * 0.1 + 0.95).toFixed(2);
@@ -237,11 +239,36 @@ async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName
     const subtitleStyle =
         'FontName=Microsoft YaHei,FontSize=14,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=72';
 
-    console.log(`   📐 视频素材总时长约 ${targetSec.toFixed(2)}s，口播原长约 ${audioDur.toFixed(2)}s`);
-    console.log('   🎤 【原速口播】不做 atempo 拉伸，成片时长 = min(拼接视频, 音频)（-shortest）');
+    const effectiveVoice = Math.min(audioDur, targetSec);
+    const voicePadSec = Math.max(0, targetSec - effectiveVoice);
+    const needBgmLoop = bgmDur < targetSec - 0.02;
+
+    console.log(
+        `   📐 成片以画面为准: ${targetSec.toFixed(2)}s | 口播原长 ${audioDur.toFixed(2)}s` +
+            (audioDur > targetSec ? '（超长部分截断）' : voicePadSec > 0.01 ? ` | 口播后垫 BGM ${voicePadSec.toFixed(2)}s` : '')
+    );
+    console.log(
+        `   🎵 BGM ${bgmDur.toFixed(1)}s → ${targetSec.toFixed(1)}s` + (needBgmLoop ? '（循环接满）' : '（直接截断）') + ` 混音增益 ${BGM_MIX_VOLUME}`
+    );
     console.log(`   🛡️ 防去重 -> 缩放: ${zoom}x | 对比度: ${contrast} | 亮度: ${brightness} | 饱和度: ${saturation}`);
-    console.log(`   🎵 BGM 混音增益: ${BGM_MIX_VOLUME}（可用环境变量 BGM_MIX_VOLUME 调整）| amix 兼容版`);
-    console.log('   ⏳ 高阶渲染（淡入淡出 + 调色 + 动态字幕 + BGM 混音 + x264）进行中…');
+    console.log('   ⏳ 高阶渲染 (口播+BGM 同长混音 + 动态字幕 + x264) 进行中…');
+
+    const pStr = voicePadSec.toFixed(3);
+    // 用 anullsrc+concat 补静音，兼容无 apad=pad_dur 的旧版 FFmpeg
+    const voiceGraph =
+        voicePadSec >= 0.001
+            ? [
+                  `[3:a]aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=0:${tStr},aresample=48000[v_c]`,
+                  `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=0:${pStr},aformat=sample_fmts=fltp:channel_layouts=stereo[s_pad]`,
+                  `[v_c][s_pad]concat=n=2:v=0:a=1[voice_t]`
+              ].join(';')
+            : `[3:a]aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=0:${tStr},aresample=48000[voice_t]`;
+
+    let bgmChain = `[4:a]aformat=sample_fmts=fltp:channel_layouts=stereo`;
+    if (needBgmLoop) {
+        bgmChain += ',aloop=loop=-1';
+    }
+    bgmChain += `,atrim=0:${tStr},aresample=48000,volume=${BGM_MIX_VOLUME}[bgm_t]`;
 
     const filterComplex = [
         `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${fadeOutStart(hookDur)}:d=0.2,format=yuv420p,fps=30[v0]`,
@@ -249,7 +276,7 @@ async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName
         `[2:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${fadeOutStart(sceneDur)}:d=0.2,format=yuv420p,fps=30[v2]`,
         `[v0][v1][v2]concat=n=3:v=1:a=0[concat_v]`,
         `[concat_v]eq=contrast=${contrast}:brightness=${brightness}:saturation=${saturation},scale=iw*${zoom}:ih*${zoom},crop=1080:1920,subtitles='${srtPathF}':force_style='${subtitleStyle}'[out_v]`,
-        `[3:a]aformat=sample_fmts=fltp:channel_layouts=stereo[voice_f];[4:a]volume=${BGM_MIX_VOLUME},aformat=sample_fmts=fltp:channel_layouts=stereo[bgm_f];[voice_f][bgm_f]amix=inputs=2:duration=first[out_a]`
+        `${voiceGraph};${bgmChain};[voice_t][bgm_t]amix=inputs=2:duration=first[out_a]`
     ].join(';');
 
     try {
@@ -266,6 +293,8 @@ async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName
                     '[out_v]',
                     '-map',
                     '[out_a]',
+                    '-t',
+                    tStr,
                     '-c:v',
                     'libx264',
                     '-preset',
@@ -273,8 +302,7 @@ async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName
                     '-crf',
                     '23',
                     '-c:a',
-                    'aac',
-                    '-shortest'
+                    'aac'
                 ])
                 .on('end', () => resolve())
                 .on('error', (err) => reject(err))
