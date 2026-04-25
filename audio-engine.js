@@ -58,7 +58,7 @@ async function generateBatchAudio() {
 
             try {
                 // toStream 内部会用 _SSMLTemplate 包一层 speak/voice/prosody，这里只传正文 + 语速，避免嵌套整段 SSML 导致无音频
-                const { audioStream } = tts.toStream(escapeXmlText(item.content), { rate: '+20%' });
+                const { audioStream } = tts.toStream(escapeXmlText(item.content), { rate: '+30%' });
                 const writable = fs.createWriteStream(filePath);
                 await pipeline(audioStream, writable);
 
