@@ -20,9 +20,9 @@ if (fs.existsSync(EXCEL_PATH)) {
     const workbook = xlsx.readFile(EXCEL_PATH);
     const sheetName = workbook.SheetNames[0];
     const rawData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
-    scriptsData = rawData.map((row, i) => ({
-        version: row.version || `audio_${i}`,
-        content: [row.hook, row.content, row.callToAction].filter(Boolean).join(' ')
+    scriptsData = rawData.map(row => ({
+        version: row.version || `audio_${Date.now()}`,
+        content: `${row.hook || ''} ${row.pain || ''} ${row.proof || ''} ${row.benefit || ''} ${row.cta || ''}`
     }));
 } else {
     console.error('⚠️ [致命错误] 未找到 generated_scripts.xlsx！请先运行 content-engine.js。');

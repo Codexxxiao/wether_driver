@@ -209,122 +209,95 @@ function fadeOutStart(segDurSec) {
  * 口播不拉伸：atrim 到 target；短于画面时 anullsrc+concat 补静音（避免旧 FFmpeg 的 apad=pad_dur 不兼容）。长口播截断。
  * BGM 短于画面则 aloop+atrim 铺满。输出 -t targetSec 固定成片时长。
  */
-async function mixThreeClipsAndAudio(hookPath, productPath, scenePath, audioName, bgmName, scriptText, outputName) {
+async function mixFiveClipsAndAudio(hookPath, painPath, proofPath, benefitPath, ctaPath, audioName, bgmName, scriptText, outputName) {
     const hookPathF = toFfmpegPath(hookPath);
-    const prodPathF = toFfmpegPath(productPath);
-    const scenePathF = toFfmpegPath(scenePath);
+    const painPathF = toFfmpegPath(painPath);
+    const proofPathF = toFfmpegPath(proofPath);
+    const benefitPathF = toFfmpegPath(benefitPath);
+    const ctaPathF = toFfmpegPath(ctaPath);
+
     const audioPath = path.join(AUDIO_DIR, audioName);
     const bgmPath = path.join(BGM_DIR, bgmName);
     const outputPath = path.join(OUTPUT_DIR, outputName);
     const tempSrtPath = path.join(OUTPUT_DIR, `temp_${Date.now()}.srt`);
 
-    const hookDur = getMediaDurationSeconds(hookPath);
-    const prodDur = getMediaDurationSeconds(productPath);
-    const sceneDur = getMediaDurationSeconds(scenePath);
-    const targetSec = hookDur + prodDur + sceneDur;
-    const tStr = Math.max(0.01, targetSec).toFixed(3);
-    const audioDur = getMediaDurationSecondsOr(audioPath, targetSec);
-    const bgmDur = getMediaDurationSecondsOr(bgmPath, 9999);
+    // 1. 获取 5 段视频的各自时长
+    const durHook = getMediaDurationSeconds(hookPath);
+    const durPain = getMediaDurationSeconds(painPath);
+    const durProof = getMediaDurationSeconds(proofPath);
+    const durBenefit = getMediaDurationSeconds(benefitPath);
+    const durCta = getMediaDurationSeconds(ctaPath);
+    const targetSec = durHook + durPain + durProof + durBenefit + durCta;
 
-    // 字幕只在成片可见区间内铺：口播与画面等长取 min(口播, 画面)
-    const srtVisibleSec = Math.max(0.1, Math.min(audioDur, targetSec));
-    generateSrtFile(scriptText, srtVisibleSec, tempSrtPath);
+    const audioDur = getMediaDurationSeconds(audioPath) || targetSec;
+    generateSrtFile(scriptText, audioDur, tempSrtPath);
     const srtPathF = toSubtitlePath(tempSrtPath);
 
+    // 防去重隐形微调
     const contrast = (Math.random() * 0.1 + 0.95).toFixed(2);
     const brightness = (Math.random() * 0.04 - 0.02).toFixed(2);
     const saturation = (Math.random() * 0.2 + 0.9).toFixed(2);
     const zoom = (Math.random() * 0.04 + 1.01).toFixed(3);
 
-    const subtitleStyle =
-        'FontName=Microsoft YaHei,FontSize=14,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=72';
+    console.log(`   ⏳ 正在进行 5 段式高阶渲染 (黑闪转场 + BGM贯穿全片 + 动态字幕)...`);
 
-    const effectiveVoice = Math.min(audioDur, targetSec);
-    const voicePadSec = Math.max(0, targetSec - effectiveVoice);
-    const needBgmLoop = bgmDur < targetSec - 0.02;
+    const subtitleStyle = "FontName=Microsoft YaHei,FontSize=22,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=150";
 
-    console.log(
-        `   📐 成片以画面为准: ${targetSec.toFixed(2)}s | 口播原长 ${audioDur.toFixed(2)}s` +
-            (audioDur > targetSec ? '（超长部分截断）' : voicePadSec > 0.01 ? ` | 口播后垫 BGM ${voicePadSec.toFixed(2)}s` : '')
-    );
-    console.log(
-        `   🎵 BGM ${bgmDur.toFixed(1)}s → ${targetSec.toFixed(1)}s` + (needBgmLoop ? '（循环接满）' : '（直接截断）') + ` 混音增益 ${BGM_MIX_VOLUME}`
-    );
-    console.log(`   🛡️ 防去重 -> 缩放: ${zoom}x | 对比度: ${contrast} | 亮度: ${brightness} | 饱和度: ${saturation}`);
-    console.log('   ⏳ 高阶渲染 (口播+BGM 同长混音 + 动态字幕 + x264) 进行中…');
-
-    const pStr = voicePadSec.toFixed(3);
-    // 用 anullsrc+concat 补静音，兼容无 apad=pad_dur 的旧版 FFmpeg
-    const voiceGraph =
-        voicePadSec >= 0.001
-            ? [
-                  `[3:a]aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=0:${tStr},aresample=48000[v_c]`,
-                  `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=0:${pStr},aformat=sample_fmts=fltp:channel_layouts=stereo[s_pad]`,
-                  `[v_c][s_pad]concat=n=2:v=0:a=1[voice_t]`
-              ].join(';')
-            : `[3:a]aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=0:${tStr},aresample=48000[voice_t]`;
-
-    let bgmChain = `[4:a]aformat=sample_fmts=fltp:channel_layouts=stereo`;
-    if (needBgmLoop) {
-        bgmChain += ',aloop=loop=-1';
-    }
-    bgmChain += `,atrim=0:${tStr},aresample=48000,volume=${BGM_MIX_VOLUME}[bgm_t]`;
-
+    // 构建极为复杂的 5 轨视音频混合网络 (Filter Complex)
     const filterComplex = [
-        `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${fadeOutStart(hookDur)}:d=0.2,format=yuv420p,fps=30[v0]`,
-        `[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${fadeOutStart(prodDur)}:d=0.2,format=yuv420p,fps=30[v1]`,
-        `[2:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${fadeOutStart(sceneDur)}:d=0.2,format=yuv420p,fps=30[v2]`,
-        `[v0][v1][v2]concat=n=3:v=1:a=0[concat_v]`,
+        // 处理 5 段视频画面 (统一尺寸、裁剪、淡入淡出黑闪)
+        `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${(durHook - 0.2).toFixed(2)}:d=0.2,format=yuv420p,fps=30[v0]`,
+        `[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${(durPain - 0.2).toFixed(2)}:d=0.2,format=yuv420p,fps=30[v1]`,
+        `[2:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${(durProof - 0.2).toFixed(2)}:d=0.2,format=yuv420p,fps=30[v2]`,
+        `[3:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${(durBenefit - 0.2).toFixed(2)}:d=0.2,format=yuv420p,fps=30[v3]`,
+        `[4:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${(durCta - 0.2).toFixed(2)}:d=0.2,format=yuv420p,fps=30[v4]`,
+
+        // 拼接 5 段视频
+        `[v0][v1][v2][v3][v4]concat=n=5:v=1:a=0[concat_v]`,
+
+        // 视频后期微调与字幕烧录
         `[concat_v]eq=contrast=${contrast}:brightness=${brightness}:saturation=${saturation},scale=iw*${zoom}:ih*${zoom},crop=1080:1920,subtitles='${srtPathF}':force_style='${subtitleStyle}'[out_v]`,
-        `${voiceGraph};${bgmChain};[voice_t][bgm_t]amix=inputs=2:duration=first[out_a]`
+
+        // 音频混音：主口播 [5:a] + 压低音量的 BGM [6:a]，以最长的轨(duration=longest)为准
+        `[6:a]volume=0.15[bgm];[5:a][bgm]amix=inputs=2:duration=longest:dropout_transition=2[out_a]`
     ].join(';');
 
     try {
         await new Promise((resolve, reject) => {
             ffmpeg()
-                .input(hookPathF)
-                .input(prodPathF)
-                .input(scenePathF)
-                .input(audioPath)
-                .input(bgmPath)
+                .input(hookPathF)     // [0]
+                .input(painPathF)     // [1]
+                .input(proofPathF)    // [2]
+                .input(benefitPathF)  // [3]
+                .input(ctaPathF)      // [4]
+                .input(audioPath)     // [5:a]
+                .input(bgmPath)       // [6:a]
                 .complexFilter(filterComplex)
                 .outputOptions([
-                    '-map',
-                    '[out_v]',
-                    '-map',
-                    '[out_a]',
-                    '-t',
-                    tStr,
-                    '-c:v',
-                    'libx264',
-                    '-preset',
-                    'fast',
-                    '-crf',
-                    '23',
-                    '-c:a',
-                    'aac'
+                    '-map [out_v]',
+                    '-map [out_a]',
+                    '-c:v libx264',
+                    '-preset fast',
+                    '-crf 23',
+                    '-c:a aac',
+                    '-shortest'        // 视频在画面结束时精准切断
                 ])
                 .on('end', () => resolve())
                 .on('error', (err) => reject(err))
                 .save(outputPath);
         });
     } finally {
-        if (fs.existsSync(tempSrtPath)) {
-            try {
-                fs.unlinkSync(tempSrtPath);
-            } catch { /* ignore */ }
-        }
+        if (fs.existsSync(tempSrtPath)) fs.unlinkSync(tempSrtPath);
     }
 
     return outputName;
 }
-
 /**
  * 飞书回传：E 列状态 + F 列（纯文本，或上传素材后的可点击链接：官方 v2 不支持直接写附件对象，用 type:url）
  */
 async function updateFeishuStatus(rowIndex, status, fColumn) {
     const actualRow = rowIndex + 1;
-    const rangeRaw = `${SHEET_ID}!E${actualRow}:F${actualRow}`;
+    const rangeRaw = `${SHEET_ID}!G${actualRow}:H${actualRow}`;
 
     let fCell;
     if (fColumn && typeof fColumn === 'object' && fColumn.fileToken) {
@@ -387,7 +360,7 @@ async function startV3Engine() {
             const row = tableRows[i];
             if (!row || !row[0]) continue;
 
-            const [videoName, hook, product, scene, status] = row;
+            const [videoName, hook, pain, proof, benefit, cta, status] = row;
             const statusStr = typeof status === 'string' ? status.trim() : String(status ?? '');
 
             if (statusStr === '待生成') {
@@ -433,10 +406,12 @@ async function startV3Engine() {
                     console.log(`   🎵 匹配背景音乐: [${bgmName}]`);
 
                     const hookPath = await resolveCellToVideoPath(hook, 'hook', runKey);
-                    const prodPath = await resolveCellToVideoPath(product, 'product', runKey);
-                    const scenePath = await resolveCellToVideoPath(scene, 'scene', runKey);
+                    const painPath = await resolveCellToVideoPath(pain, 'pain', runKey);
+                    const proofPath = await resolveCellToVideoPath(proof, 'proof', runKey);
+                    const benefitPath = await resolveCellToVideoPath(benefit, 'benefit', runKey);
+                    const ctaPath = await resolveCellToVideoPath(cta, 'cta', runKey);
 
-                    await mixThreeClipsAndAudio(hookPath, prodPath, scenePath, audioName, bgmName, scriptText, outputName);
+                    await mixFiveClipsAndAudio(hookPath, painPath, proofPath, benefitPath, ctaPath, audioName, bgmName, scriptText, outputName);
                     console.log(`   ✅ 视频 [${outputName}] 渲染完成！`);
 
                     const outAbs = path.join(OUTPUT_DIR, outputName);
