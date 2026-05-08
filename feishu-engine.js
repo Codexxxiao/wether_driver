@@ -259,8 +259,8 @@ async function mixFiveClipsAndAudio(hookPath, painPath, proofPath, benefitPath, 
 
     // 构建极为复杂的 5 轨视音频混合网络 (Filter Complex)
     const filterComplex = [
-        // 处理 5 段视频画面 (统一尺寸、裁剪、淡入淡出黑闪)
-        `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${(durHook - 0.2).toFixed(2)}:d=0.2,format=yuv420p,fps=30[v0]`,
+        // 首段(Hook)不做片头 fade-in，避免成片第 1 帧纯黑导致平台封面黑屏；其余段保留黑场切入
+        `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=out:st=${(durHook - 0.2).toFixed(2)}:d=0.2,format=yuv420p,fps=30[v0]`,
         `[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${(durPain - 0.2).toFixed(2)}:d=0.2,format=yuv420p,fps=30[v1]`,
         `[2:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${(durProof - 0.2).toFixed(2)}:d=0.2,format=yuv420p,fps=30[v2]`,
         `[3:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${(durBenefit - 0.2).toFixed(2)}:d=0.2,format=yuv420p,fps=30[v3]`,
@@ -324,7 +324,12 @@ async function mixFiveClipsNativeAudio(hookPath, painPath, proofPath, benefitPat
     console.log('   ⏳ 纯混剪渲染（保留原声、无字幕口播BGM）...');
     const videoFilters = durs.map((d, i) => {
         const outSt = Math.max(0, d - 0.2).toFixed(2);
-        return `[${i}:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${outSt}:d=0.2,format=yuv420p,fps=30[v${i}]`;
+        const base = `[${i}:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920`;
+        const tail = `fade=t=out:st=${outSt}:d=0.2,format=yuv420p,fps=30[v${i}]`;
+        if (i === 0) {
+            return `${base},${tail}`;
+        }
+        return `${base},fade=t=in:st=0:d=0.2,${tail}`;
     });
 
     const audioFilters = [];
@@ -333,13 +338,15 @@ async function mixFiveClipsNativeAudio(hookPath, painPath, proofPath, benefitPat
         const dStr = d.toFixed(3);
         const st = fadeOutStart(d);
         if (hasAudio[i]) {
+            const afIn = i === 0 ? '' : 'afade=t=in:st=0:d=0.2,';
             audioFilters.push(
-                `[${i}:a]aformat=sample_fmts=fltp:channel_layouts=stereo,aresample=44100,afade=t=in:st=0:d=0.2,afade=t=out:st=${st}:d=0.2,atrim=0:${dStr},asetpts=PTS-STARTPTS[a${i}]`
+                `[${i}:a]aformat=sample_fmts=fltp:channel_layouts=stereo,aresample=44100,${afIn}afade=t=out:st=${st}:d=0.2,atrim=0:${dStr},asetpts=PTS-STARTPTS[a${i}]`
             );
         } else {
             console.log(`   🔇 片段 [${i}] 无音频轨，本段将输出静音以对齐画面`);
+            const afIn = i === 0 ? '' : 'afade=t=in:st=0:d=0.2,';
             audioFilters.push(
-                `anullsrc=channel_layout=stereo:sample_rate=44100,atrim=0:${dStr},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.2,afade=t=out:st=${st}:d=0.2,aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`
+                `anullsrc=channel_layout=stereo:sample_rate=44100,atrim=0:${dStr},asetpts=PTS-STARTPTS,${afIn}afade=t=out:st=${st}:d=0.2,aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`
             );
         }
     }
@@ -428,7 +435,8 @@ async function startV3Engine() {
     console.log(`   ⚙️ RENDER_MODE=${IS_CLIPS_ONLY ? 'clips_only（纯混剪·原声）' : 'full（口播+BGM+字幕）'}`);
 
     try {
-        const range = encodeURIComponent(`${SHEET_ID}!A1:F50`);
+        // 须含 G「状态」、H「成片」；仅 A–F 时读不到「待生成」，无法触发渲染
+        const range = encodeURIComponent(`${SHEET_ID}!A1:H50`);
         const response = await client.request({
             method: 'GET',
             url: `/open-apis/sheets/v2/spreadsheets/${SPREADSHEET_TOKEN}/values/${range}`
@@ -446,7 +454,13 @@ async function startV3Engine() {
             const row = tableRows[i];
             if (!row || !row[0]) continue;
 
-            const [videoName, hook, pain, proof, benefit, cta, status] = row;
+            const videoName = row[0];
+            const hook = row[1];
+            const pain = row[2];
+            const proof = row[3];
+            const benefit = row[4];
+            const cta = row[5];
+            const status = row[6];
             const statusStr = typeof status === 'string' ? status.trim() : String(status ?? '');
 
             if (statusStr === '待生成') {
