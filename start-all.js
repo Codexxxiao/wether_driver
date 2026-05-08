@@ -58,8 +58,15 @@ async function main() {
     console.log('🌟 气象驱动分发引擎 V1.0 - 全自动流水线启动');
     console.log('==========================================');
 
-    await runEngine('AI 编剧中心', 'content-engine.js');
-    await runEngine('AI 配音工厂', 'audio-engine.js');
+    const renderMode = (process.env.RENDER_MODE || 'full').trim().toLowerCase();
+    const clipsOnly = renderMode === 'clips_only';
+    if (clipsOnly) {
+        console.log('⏭️ RENDER_MODE=clips_only：跳过 AI 编剧与配音（飞书任务将仅做片段混剪并保留原声）');
+        writeLog('[跳过] content-engine / audio-engine（RENDER_MODE=clips_only）');
+    } else {
+        await runEngine('AI 编剧中心', 'content-engine.js');
+        await runEngine('AI 配音工厂', 'audio-engine.js');
+    }
 
     await runEngine('达尔文进化引擎', 'evolution-engine.js');
     await runEngine('繁衍中枢', 'brain-engine.js');

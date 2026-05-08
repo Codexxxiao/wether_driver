@@ -28,6 +28,10 @@ if (!fs.existsSync(BGM_DIR)) fs.mkdirSync(BGM_DIR, { recursive: true });
 /** BGM 在混音前的相对音量（0~1）；老版本 FFmpeg 的 amix 无 normalize 选项，靠增益补偿 */
 const BGM_MIX_VOLUME = Number(process.env.BGM_MIX_VOLUME) || 0.38;
 
+/** full = 口播+BGM+字幕 | clips_only = 仅五段画面拼接，保留各段素材原声 */
+const RENDER_MODE = (process.env.RENDER_MODE || 'full').trim().toLowerCase();
+const IS_CLIPS_ONLY = RENDER_MODE === 'clips_only';
+
 /**
  * 解析单元格：纯字符串视为 assets 下文件名；飞书附件数组则取 fileToken 下载
  */
@@ -143,6 +147,16 @@ function getMediaDurationSecondsOr(filePath, fallbackSec) {
     } catch {
         return fallbackSec;
     }
+}
+
+/** 是否含至少一路音频流（无音轨的片段在纯混剪模式下会补静音，避免 concat 失败） */
+function fileHasAudioStream(filePath) {
+    const r = spawnSync(
+        ffmpegInstaller.path,
+        ['-hide_banner', '-i', filePath],
+        { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 }
+    );
+    return /Stream\s+#\d+:\d+.*Audio:/m.test(r.stderr || '');
 }
 
 /**
@@ -292,6 +306,77 @@ async function mixFiveClipsAndAudio(hookPath, painPath, proofPath, benefitPath, 
 
     return outputName;
 }
+
+/**
+ * 纯混剪：五段视频与各自原声对齐拼接（无口播、无 BGM、无字幕），无音轨的片段补Stereo静音以兼容 concat
+ */
+async function mixFiveClipsNativeAudio(hookPath, painPath, proofPath, benefitPath, ctaPath, outputName) {
+    const paths = [hookPath, painPath, proofPath, benefitPath, ctaPath];
+    const pathsF = paths.map(toFfmpegPath);
+    const durs = paths.map((p) => getMediaDurationSeconds(p));
+    const hasAudio = paths.map(fileHasAudioStream);
+
+    const contrast = (Math.random() * 0.1 + 0.95).toFixed(2);
+    const brightness = (Math.random() * 0.04 - 0.02).toFixed(2);
+    const saturation = (Math.random() * 0.2 + 0.9).toFixed(2);
+    const zoom = (Math.random() * 0.04 + 1.01).toFixed(3);
+
+    console.log('   ⏳ 纯混剪渲染（保留原声、无字幕口播BGM）...');
+    const videoFilters = durs.map((d, i) => {
+        const outSt = Math.max(0, d - 0.2).toFixed(2);
+        return `[${i}:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${outSt}:d=0.2,format=yuv420p,fps=30[v${i}]`;
+    });
+
+    const audioFilters = [];
+    for (let i = 0; i < 5; i++) {
+        const d = durs[i];
+        const dStr = d.toFixed(3);
+        const st = fadeOutStart(d);
+        if (hasAudio[i]) {
+            audioFilters.push(
+                `[${i}:a]aformat=sample_fmts=fltp:channel_layouts=stereo,aresample=44100,afade=t=in:st=0:d=0.2,afade=t=out:st=${st}:d=0.2,atrim=0:${dStr},asetpts=PTS-STARTPTS[a${i}]`
+            );
+        } else {
+            console.log(`   🔇 片段 [${i}] 无音频轨，本段将输出静音以对齐画面`);
+            audioFilters.push(
+                `anullsrc=channel_layout=stereo:sample_rate=44100,atrim=0:${dStr},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.2,afade=t=out:st=${st}:d=0.2,aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`
+            );
+        }
+    }
+
+    const filterComplex = [
+        ...videoFilters,
+        ...audioFilters,
+        '[v0][v1][v2][v3][v4]concat=n=5:v=1:a=0[concat_v]',
+        '[a0][a1][a2][a3][a4]concat=n=5:v=0:a=1[concat_a]',
+        `[concat_v]eq=contrast=${contrast}:brightness=${brightness}:saturation=${saturation},scale=iw*${zoom}:ih*${zoom},crop=1080:1920[out_v]`
+    ].join(';');
+
+    const outputPath = path.join(OUTPUT_DIR, outputName);
+    await new Promise((resolve, reject) => {
+        ffmpeg()
+            .input(pathsF[0])
+            .input(pathsF[1])
+            .input(pathsF[2])
+            .input(pathsF[3])
+            .input(pathsF[4])
+            .complexFilter(filterComplex)
+            .outputOptions([
+                '-map [out_v]',
+                '-map [concat_a]',
+                '-c:v libx264',
+                '-preset fast',
+                '-crf 23',
+                '-c:a aac',
+                '-b:a 192k'
+            ])
+            .on('end', () => resolve())
+            .on('error', (err) => reject(err))
+            .save(outputPath);
+    });
+
+    return outputName;
+}
 /**
  * 飞书回传：E 列状态 + F 列（纯文本，或上传素材后的可点击链接：官方 v2 不支持直接写附件对象，用 type:url）
  */
@@ -340,6 +425,7 @@ async function updateFeishuStatus(rowIndex, status, fColumn) {
 
 async function startV3Engine() {
     console.log('🏭 [气象矩阵中枢 V3.0] 启动！开始接管飞书流水线...');
+    console.log(`   ⚙️ RENDER_MODE=${IS_CLIPS_ONLY ? 'clips_only（纯混剪·原声）' : 'full（口播+BGM+字幕）'}`);
 
     try {
         const range = encodeURIComponent(`${SHEET_ID}!A1:F50`);
@@ -371,47 +457,51 @@ async function startV3Engine() {
                 const outputName = `${videoName}_成片.mp4`;
 
                 try {
-                    const availableAudios = fs.readdirSync(AUDIO_DIR).filter((file) => file.endsWith('.mp3'));
-                    if (availableAudios.length === 0) {
-                        throw new Error('⚠️ audio_assets 文件夹中没有任何 mp3 配音，无法渲染！');
-                    }
-                    const randomIndex = Math.floor(Math.random() * availableAudios.length);
-                    const audioName = availableAudios[randomIndex];
-                    let scriptText = '夏日出行，防晒神器。';
-                    if (fs.existsSync(EXCEL_PATH)) {
-                        try {
-                            const wb = xlsx.readFile(EXCEL_PATH);
-                            const data = xlsx.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
-                            const versionKey = audioName.replace(/\.mp3$/i, '');
-                            const row = data.find((r) => r.version === versionKey);
-                            if (row) {
-                                scriptText = `${row.hook || ''}${row.content || ''}${row.callToAction || ''}`;
-                            }
-                        } catch (e) {
-                            console.error(`   ⚠️ 读取 ${path.basename(EXCEL_PATH)} 失败，使用默认文案: ${e.message}`);
-                        }
-                    }
-                    if (!String(scriptText).trim()) {
-                        scriptText = '夏日出行，防晒神器。';
-                    }
-                    const preview = scriptText.length > 20 ? `${scriptText.slice(0, 20)}...` : scriptText;
-                    console.log(`   🎤 匹配音频: [${audioName}]`);
-                    console.log(`   📜 提取文案: [${preview}]`);
-
-                    const availableBgms = fs.readdirSync(BGM_DIR).filter((file) => file.endsWith('.mp3'));
-                    if (availableBgms.length === 0) {
-                        throw new Error('⚠️ bgm_assets 文件夹是空的，请至少放入一首背景音乐！');
-                    }
-                    const bgmName = availableBgms[Math.floor(Math.random() * availableBgms.length)];
-                    console.log(`   🎵 匹配背景音乐: [${bgmName}]`);
-
                     const hookPath = await resolveCellToVideoPath(hook, 'hook', runKey);
                     const painPath = await resolveCellToVideoPath(pain, 'pain', runKey);
                     const proofPath = await resolveCellToVideoPath(proof, 'proof', runKey);
                     const benefitPath = await resolveCellToVideoPath(benefit, 'benefit', runKey);
                     const ctaPath = await resolveCellToVideoPath(cta, 'cta', runKey);
 
-                    await mixFiveClipsAndAudio(hookPath, painPath, proofPath, benefitPath, ctaPath, audioName, bgmName, scriptText, outputName);
+                    if (IS_CLIPS_ONLY) {
+                        await mixFiveClipsNativeAudio(hookPath, painPath, proofPath, benefitPath, ctaPath, outputName);
+                    } else {
+                        const availableAudios = fs.readdirSync(AUDIO_DIR).filter((file) => file.endsWith('.mp3'));
+                        if (availableAudios.length === 0) {
+                            throw new Error('⚠️ audio_assets 文件夹中没有任何 mp3 配音，无法渲染！');
+                        }
+                        const randomIndex = Math.floor(Math.random() * availableAudios.length);
+                        const audioName = availableAudios[randomIndex];
+                        let scriptText = '夏日出行，防晒神器。';
+                        if (fs.existsSync(EXCEL_PATH)) {
+                            try {
+                                const wb = xlsx.readFile(EXCEL_PATH);
+                                const data = xlsx.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+                                const versionKey = audioName.replace(/\.mp3$/i, '');
+                                const scriptRow = data.find((r) => r.version === versionKey);
+                                if (scriptRow) {
+                                    scriptText = `${scriptRow.hook || ''}${scriptRow.content || ''}${scriptRow.callToAction || ''}`;
+                                }
+                            } catch (e) {
+                                console.error(`   ⚠️ 读取 ${path.basename(EXCEL_PATH)} 失败，使用默认文案: ${e.message}`);
+                            }
+                        }
+                        if (!String(scriptText).trim()) {
+                            scriptText = '夏日出行，防晒神器。';
+                        }
+                        const preview = scriptText.length > 20 ? `${scriptText.slice(0, 20)}...` : scriptText;
+                        console.log(`   🎤 匹配音频: [${audioName}]`);
+                        console.log(`   📜 提取文案: [${preview}]`);
+
+                        const availableBgms = fs.readdirSync(BGM_DIR).filter((file) => file.endsWith('.mp3'));
+                        if (availableBgms.length === 0) {
+                            throw new Error('⚠️ bgm_assets 文件夹是空的，请至少放入一首背景音乐！');
+                        }
+                        const bgmName = availableBgms[Math.floor(Math.random() * availableBgms.length)];
+                        console.log(`   🎵 匹配背景音乐: [${bgmName}]`);
+
+                        await mixFiveClipsAndAudio(hookPath, painPath, proofPath, benefitPath, ctaPath, audioName, bgmName, scriptText, outputName);
+                    }
                     console.log(`   ✅ 视频 [${outputName}] 渲染完成！`);
 
                     const outAbs = path.join(OUTPUT_DIR, outputName);
