@@ -218,12 +218,15 @@ function fadeOutStart(segDurSec) {
     return Math.max(0, segDurSec - 0.2).toFixed(2);
 }
 
-/**
- * 高阶渲染（成片时长=画面总长 + 口播/BGM 与画面对齐 + 动态字幕）
- * 口播不拉伸：atrim 到 target；短于画面时 anullsrc+concat 补静音（避免旧 FFmpeg 的 apad=pad_dur 不兼容）。长口播截断。
- * BGM 短于画面则 aloop+atrim 铺满。输出 -t targetSec 固定成片时长。
- */
-async function mixFiveClipsAndAudio(hookPath, painPath, proofPath, benefitPath, ctaPath, audioName, bgmName, scriptText, outputName) {
+/** 输出子目录名：去除路径非法字符 */
+function safeDirSegment(name) {
+    return String(name ?? '')
+        .replace(/[/\\?*:|"<>]/g, '_')
+        .trim() || '_';
+}
+
+/** 口播+BGM+动态字幕；成片写入 output/<category>/<style>/ */
+async function mixFiveClipsAndAudio(hookPath, painPath, proofPath, benefitPath, ctaPath, audioName, bgmName, scriptText, category, style, outputName) {
     const hookPathF = toFfmpegPath(hookPath);
     const painPathF = toFfmpegPath(painPath);
     const proofPathF = toFfmpegPath(proofPath);
@@ -232,10 +235,17 @@ async function mixFiveClipsAndAudio(hookPath, painPath, proofPath, benefitPath, 
 
     const audioPath = path.join(AUDIO_DIR, audioName);
     const bgmPath = path.join(BGM_DIR, bgmName);
-    const outputPath = path.join(OUTPUT_DIR, outputName);
-    const tempSrtPath = path.join(OUTPUT_DIR, `temp_${Date.now()}.srt`);
 
-    // 1. 获取 5 段视频的各自时长
+    const catDir = safeDirSegment(category);
+    const styleDir = safeDirSegment(style);
+    const skuOutputDir = path.join(OUTPUT_DIR, catDir, styleDir);
+    if (!fs.existsSync(skuOutputDir)) {
+        fs.mkdirSync(skuOutputDir, { recursive: true });
+    }
+
+    const outputPath = path.join(skuOutputDir, outputName);
+    const tempSrtPath = path.join(skuOutputDir, `temp_${Date.now()}.srt`);
+
     const durHook = getMediaDurationSeconds(hookPath);
     const durPain = getMediaDurationSeconds(painPath);
     const durProof = getMediaDurationSeconds(proofPath);
@@ -247,55 +257,33 @@ async function mixFiveClipsAndAudio(hookPath, painPath, proofPath, benefitPath, 
     generateSrtFile(scriptText, audioDur, tempSrtPath);
     const srtPathF = toSubtitlePath(tempSrtPath);
 
-    // 防去重隐形微调
     const contrast = (Math.random() * 0.1 + 0.95).toFixed(2);
     const brightness = (Math.random() * 0.04 - 0.02).toFixed(2);
     const saturation = (Math.random() * 0.2 + 0.9).toFixed(2);
     const zoom = (Math.random() * 0.04 + 1.01).toFixed(3);
 
-    console.log(`   ⏳ 正在进行 5 段式高阶渲染 (黑闪转场 + BGM贯穿全片 + 动态字幕)...`);
+    console.log(`   ⏳ 正在渲染... 将输出至: output/${catDir}/${styleDir}/`);
 
     const subtitleStyle = "FontName=Microsoft YaHei,FontSize=22,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=150";
 
-    // 构建极为复杂的 5 轨视音频混合网络 (Filter Complex)
     const filterComplex = [
-        // 首段(Hook)不做片头 fade-in，避免成片第 1 帧纯黑导致平台封面黑屏；其余段保留黑场切入
         `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=out:st=${(durHook - 0.2).toFixed(2)}:d=0.2,format=yuv420p,fps=30[v0]`,
         `[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${(durPain - 0.2).toFixed(2)}:d=0.2,format=yuv420p,fps=30[v1]`,
         `[2:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${(durProof - 0.2).toFixed(2)}:d=0.2,format=yuv420p,fps=30[v2]`,
         `[3:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${(durBenefit - 0.2).toFixed(2)}:d=0.2,format=yuv420p,fps=30[v3]`,
         `[4:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fade=t=in:st=0:d=0.2,fade=t=out:st=${(durCta - 0.2).toFixed(2)}:d=0.2,format=yuv420p,fps=30[v4]`,
-
-        // 拼接 5 段视频
         `[v0][v1][v2][v3][v4]concat=n=5:v=1:a=0[concat_v]`,
-
-        // 视频后期微调与字幕烧录
         `[concat_v]eq=contrast=${contrast}:brightness=${brightness}:saturation=${saturation},scale=iw*${zoom}:ih*${zoom},crop=1080:1920,subtitles='${srtPathF}':force_style='${subtitleStyle}'[out_v]`,
-
-        // 音频混音：主口播 [5:a] + 压低音量的 BGM [6:a]，以最长的轨(duration=longest)为准
-        `[6:a]volume=0.15[bgm];[5:a][bgm]amix=inputs=2:duration=longest:dropout_transition=2[out_a]`
+        `[6:a]volume=${BGM_MIX_VOLUME}[bgm];[5:a][bgm]amix=inputs=2:duration=longest:dropout_transition=2[out_a]`
     ].join(';');
 
     try {
         await new Promise((resolve, reject) => {
             ffmpeg()
-                .input(hookPathF)     // [0]
-                .input(painPathF)     // [1]
-                .input(proofPathF)    // [2]
-                .input(benefitPathF)  // [3]
-                .input(ctaPathF)      // [4]
-                .input(audioPath)     // [5:a]
-                .input(bgmPath)       // [6:a]
+                .input(hookPathF).input(painPathF).input(proofPathF).input(benefitPathF).input(ctaPathF)
+                .input(audioPath).input(bgmPath)
                 .complexFilter(filterComplex)
-                .outputOptions([
-                    '-map [out_v]',
-                    '-map [out_a]',
-                    '-c:v libx264',
-                    '-preset fast',
-                    '-crf 23',
-                    '-c:a aac',
-                    '-shortest'        // 视频在画面结束时精准切断
-                ])
+                .outputOptions(['-map [out_v]', '-map [out_a]', '-c:v libx264', '-preset fast', '-crf 23', '-c:a aac', '-shortest'])
                 .on('end', () => resolve())
                 .on('error', (err) => reject(err))
                 .save(outputPath);
@@ -303,14 +291,13 @@ async function mixFiveClipsAndAudio(hookPath, painPath, proofPath, benefitPath, 
     } finally {
         if (fs.existsSync(tempSrtPath)) fs.unlinkSync(tempSrtPath);
     }
-
     return outputName;
 }
 
 /**
- * 纯混剪：五段视频与各自原声对齐拼接（无口播、无 BGM、无字幕），无音轨的片段补Stereo静音以兼容 concat
+ * 纯混剪：保留各段原声；传入 category、style 时写入 output/<category>/<style>/
  */
-async function mixFiveClipsNativeAudio(hookPath, painPath, proofPath, benefitPath, ctaPath, outputName) {
+async function mixFiveClipsNativeAudio(hookPath, painPath, proofPath, benefitPath, ctaPath, outputName, category, style) {
     const paths = [hookPath, painPath, proofPath, benefitPath, ctaPath];
     const pathsF = paths.map(toFfmpegPath);
     const durs = paths.map((p) => getMediaDurationSeconds(p));
@@ -359,7 +346,12 @@ async function mixFiveClipsNativeAudio(hookPath, painPath, proofPath, benefitPat
         `[concat_v]eq=contrast=${contrast}:brightness=${brightness}:saturation=${saturation},scale=iw*${zoom}:ih*${zoom},crop=1080:1920[out_v]`
     ].join(';');
 
-    const outputPath = path.join(OUTPUT_DIR, outputName);
+    let outDir = OUTPUT_DIR;
+    if (category != null && String(category).trim() && style != null && String(style).trim()) {
+        outDir = path.join(OUTPUT_DIR, safeDirSegment(category), safeDirSegment(style));
+        if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+    }
+    const outputPath = path.join(outDir, outputName);
     await new Promise((resolve, reject) => {
         ffmpeg()
             .input(pathsF[0])
@@ -385,27 +377,27 @@ async function mixFiveClipsNativeAudio(hookPath, painPath, proofPath, benefitPat
     return outputName;
 }
 /**
- * 飞书回传：E 列状态 + F 列（纯文本，或上传素材后的可点击链接：官方 v2 不支持直接写附件对象，用 type:url）
+ * 飞书任务表 I 列状态 + J 列说明/链接（与 brain-engine A–J 一致）
  */
-async function updateFeishuStatus(rowIndex, status, fColumn) {
+async function updateFeishuTaskStatusIJ(rowIndex, status, jColumn) {
     const actualRow = rowIndex + 1;
-    const rangeRaw = `${SHEET_ID}!G${actualRow}:H${actualRow}`;
+    const rangeRaw = `${SHEET_ID}!I${actualRow}:J${actualRow}`;
 
-    let fCell;
-    if (fColumn && typeof fColumn === 'object' && fColumn.fileToken) {
+    let jCell;
+    if (jColumn && typeof jColumn === 'object' && jColumn.fileToken) {
         try {
-            const link = await getMediaTmpDownloadUrl(fColumn.fileToken);
-            fCell = {
+            const link = await getMediaTmpDownloadUrl(jColumn.fileToken);
+            jCell = {
                 type: 'url',
-                text: fColumn.displayText != null ? String(fColumn.displayText) : '下载成片',
+                text: jColumn.displayText != null ? String(jColumn.displayText) : '下载成片',
                 link
             };
         } catch (e) {
             console.error(`   ⚠️ 无法写入链接单元格，改为纯文本: ${e.message}`);
-            fCell = fColumn.displayText != null ? String(fColumn.displayText) : String(fColumn.fileToken);
+            jCell = jColumn.displayText != null ? String(jColumn.displayText) : String(jColumn.fileToken);
         }
     } else {
-        fCell = String(fColumn ?? '');
+        jCell = String(jColumn ?? '');
     }
 
     try {
@@ -416,7 +408,7 @@ async function updateFeishuStatus(rowIndex, status, fColumn) {
             data: {
                 valueRange: {
                     range: rangeRaw,
-                    values: [[status, fCell]]
+                    values: [[status, jCell]]
                 }
             }
         });
@@ -424,7 +416,7 @@ async function updateFeishuStatus(rowIndex, status, fColumn) {
             console.error('   ❌ 飞书状态更新 API 返回:', res.msg || res);
             return;
         }
-        console.log(`   📝 飞书表格回传成功: 状态更新为 [${status}]`);
+        console.log(`   📝 飞书 I/J 列回传成功: [${status}]`);
     } catch (err) {
         console.error('   ❌ 飞书状态更新失败:', err.message);
     }
@@ -435,11 +427,11 @@ async function startV3Engine() {
     console.log(`   ⚙️ RENDER_MODE=${IS_CLIPS_ONLY ? 'clips_only（纯混剪·原声）' : 'full（口播+BGM+字幕）'}`);
 
     try {
-        // 须含 G「状态」、H「成片」；仅 A–F 时读不到「待生成」，无法触发渲染
-        const range = encodeURIComponent(`${SHEET_ID}!A1:H50`);
+        const range = encodeURIComponent(`${SHEET_ID}!A1:J50`);
         const response = await client.request({
             method: 'GET',
-            url: `/open-apis/sheets/v2/spreadsheets/${SPREADSHEET_TOKEN}/values/${range}`
+            url: `/open-apis/sheets/v2/spreadsheets/${SPREADSHEET_TOKEN}/values/${range}`,
+            params: { valueRenderOption: 'ToString' }
         });
 
         if (response.code !== 0) {
@@ -454,19 +446,23 @@ async function startV3Engine() {
             const row = tableRows[i];
             if (!row || !row[0]) continue;
 
-            const videoName = row[0];
-            const hook = row[1];
-            const pain = row[2];
-            const proof = row[3];
-            const benefit = row[4];
-            const cta = row[5];
-            const status = row[6];
+            const category = row[0];
+            const style = row[1];
+            const videoName = row[2];
+            const hook = row[3];
+            const pain = row[4];
+            const proof = row[5];
+            const benefit = row[6];
+            const cta = row[7];
+            const status = row[8];
             const statusStr = typeof status === 'string' ? status.trim() : String(status ?? '');
 
             if (statusStr === '待生成') {
-                const runKey = `${String(videoName).replace(/[^\w\u4e00-\u9fa5-]/g, '_')}_${i}_${Date.now()}`;
+                const catSeg = safeDirSegment(category);
+                const styleSeg = safeDirSegment(style);
+                const runKey = `${catSeg}_${styleSeg}_${String(videoName).replace(/[^\w\u4e00-\u9fa5-]/g, '_')}_${i}_${Date.now()}`;
                 console.log(`\n===========================================`);
-                console.log(`🎬 发现新任务: [${videoName}]`);
+                console.log(`🎬 发现新任务: [${category}] - [${style}] → ${videoName}`);
 
                 const outputName = `${videoName}_成片.mp4`;
 
@@ -478,14 +474,20 @@ async function startV3Engine() {
                     const ctaPath = await resolveCellToVideoPath(cta, 'cta', runKey);
 
                     if (IS_CLIPS_ONLY) {
-                        await mixFiveClipsNativeAudio(hookPath, painPath, proofPath, benefitPath, ctaPath, outputName);
+                        await mixFiveClipsNativeAudio(hookPath, painPath, proofPath, benefitPath, ctaPath, outputName, category, style);
                     } else {
-                        const availableAudios = fs.readdirSync(AUDIO_DIR).filter((file) => file.endsWith('.mp3'));
-                        if (availableAudios.length === 0) {
-                            throw new Error('⚠️ audio_assets 文件夹中没有任何 mp3 配音，无法渲染！');
+                        const allAudios = fs.readdirSync(AUDIO_DIR).filter((file) => file.endsWith('.mp3'));
+                        const catStr = String(category ?? '');
+                        const styleStr = String(style ?? '');
+                        const skuAudios = allAudios.filter((a) => a.includes(catStr) && a.includes(styleStr));
+                        if (skuAudios.length === 0) {
+                            console.error(
+                                `   ⚠️ 找不到同时包含大类与款式 [${catStr}]、[${styleStr}] 的文件名 mp3，跳过本行（请命名 audio_assets 时含这两段文案）。`
+                            );
+                            continue;
                         }
-                        const randomIndex = Math.floor(Math.random() * availableAudios.length);
-                        const audioName = availableAudios[randomIndex];
+                        const audioPick = Math.floor(Math.random() * skuAudios.length);
+                        const audioName = skuAudios[audioPick];
                         let scriptText = '夏日出行，防晒神器。';
                         if (fs.existsSync(EXCEL_PATH)) {
                             try {
@@ -504,7 +506,7 @@ async function startV3Engine() {
                             scriptText = '夏日出行，防晒神器。';
                         }
                         const preview = scriptText.length > 20 ? `${scriptText.slice(0, 20)}...` : scriptText;
-                        console.log(`   🎤 匹配音频: [${audioName}]`);
+                        console.log(`   🎤 匹配 SKU 口播: [${audioName}]`);
                         console.log(`   📜 提取文案: [${preview}]`);
 
                         const availableBgms = fs.readdirSync(BGM_DIR).filter((file) => file.endsWith('.mp3'));
@@ -514,26 +516,39 @@ async function startV3Engine() {
                         const bgmName = availableBgms[Math.floor(Math.random() * availableBgms.length)];
                         console.log(`   🎵 匹配背景音乐: [${bgmName}]`);
 
-                        await mixFiveClipsAndAudio(hookPath, painPath, proofPath, benefitPath, ctaPath, audioName, bgmName, scriptText, outputName);
+                        await mixFiveClipsAndAudio(
+                            hookPath,
+                            painPath,
+                            proofPath,
+                            benefitPath,
+                            ctaPath,
+                            audioName,
+                            bgmName,
+                            scriptText,
+                            category,
+                            style,
+                            outputName
+                        );
                     }
                     console.log(`   ✅ 视频 [${outputName}] 渲染完成！`);
 
-                    const outAbs = path.join(OUTPUT_DIR, outputName);
+                    const outAbs = path.join(OUTPUT_DIR, catSeg, styleSeg, outputName);
                     let mediaToken = null;
                     try {
                         mediaToken = await uploadVideoToSheetMedia(outAbs, outputName);
                         console.log('   ☁️ 已上传飞书素材，file_token 已就绪');
                     } catch (upErr) {
-                        console.error(`   ⚠️ 上传飞书附件失败，F列将写入文件名文本: ${upErr.message}`);
+                        console.error(`   ⚠️ 上传飞书附件失败，J 列将写入本地路径说明: ${upErr.message}`);
                     }
-                    await updateFeishuStatus(
+                    const localNote = `本地已生成：output/${catSeg}/${styleSeg}/${outputName}`;
+                    await updateFeishuTaskStatusIJ(
                         i,
-                        '✅ 已生成',
-                        mediaToken ? { fileToken: mediaToken, displayText: outputName } : outputName
+                        '已完成',
+                        mediaToken ? { fileToken: mediaToken, displayText: outputName } : localNote
                     );
                 } catch (err) {
                     console.error(`   ❌ 视频生成失败: ${err.message}`);
-                    await updateFeishuStatus(i, '❌ 渲染失败', String(err.message).slice(0, 200));
+                    await updateFeishuTaskStatusIJ(i, '❌ 渲染失败', String(err.message).slice(0, 200));
                 }
             }
         }
