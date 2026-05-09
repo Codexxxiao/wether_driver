@@ -32,6 +32,15 @@ const BGM_MIX_VOLUME = Number(process.env.BGM_MIX_VOLUME) || 0.38;
 const RENDER_MODE = (process.env.RENDER_MODE || 'full').trim().toLowerCase();
 const IS_CLIPS_ONLY = RENDER_MODE === 'clips_only';
 
+/** feishu-engine 仅处理表格里满足大类/款式的「待生成」行；不配置则处理全部 */
+function parseOnlyStylesFromEnv(key) {
+    const raw = (process.env[key] || '').trim();
+    if (!raw) return new Set();
+    return new Set(raw.split(/[,，]/).map((s) => s.trim()).filter(Boolean));
+}
+const FEISHU_ONLY_CATEGORY = (process.env.FEISHU_ONLY_CATEGORY || '').trim() || null;
+const FEISHU_ONLY_STYLE_SET = parseOnlyStylesFromEnv('FEISHU_ONLY_STYLE');
+
 /**
  * 解析单元格：纯字符串视为 assets 下文件名；飞书附件数组则取 fileToken 下载
  */
@@ -425,6 +434,11 @@ async function updateFeishuTaskStatusIJ(rowIndex, status, jColumn) {
 async function startV3Engine() {
     console.log('🏭 [气象矩阵中枢 V3.0] 启动！开始接管飞书流水线...');
     console.log(`   ⚙️ RENDER_MODE=${IS_CLIPS_ONLY ? 'clips_only（纯混剪·原声）' : 'full（口播+BGM+字幕）'}`);
+    if (FEISHU_ONLY_CATEGORY || FEISHU_ONLY_STYLE_SET.size > 0) {
+        console.log(
+            `   🎯 FEISHU_ONLY：大类=${FEISHU_ONLY_CATEGORY || '（未限定）'} 款式=${FEISHU_ONLY_STYLE_SET.size ? [...FEISHU_ONLY_STYLE_SET].join(' | ') : '（未限定）'}`
+        );
+    }
 
     try {
         const range = encodeURIComponent(`${SHEET_ID}!A1:J50`);
@@ -458,6 +472,12 @@ async function startV3Engine() {
             const statusStr = typeof status === 'string' ? status.trim() : String(status ?? '');
 
             if (statusStr === '待生成') {
+                if (FEISHU_ONLY_CATEGORY && String(category ?? '').trim() !== FEISHU_ONLY_CATEGORY) {
+                    continue;
+                }
+                if (FEISHU_ONLY_STYLE_SET.size > 0 && !FEISHU_ONLY_STYLE_SET.has(String(style ?? '').trim())) {
+                    continue;
+                }
                 const catSeg = safeDirSegment(category);
                 const styleSeg = safeDirSegment(style);
                 const runKey = `${catSeg}_${styleSeg}_${String(videoName).replace(/[^\w\u4e00-\u9fa5-]/g, '_')}_${i}_${Date.now()}`;

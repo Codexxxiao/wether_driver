@@ -4,8 +4,23 @@ const { SPREADSHEET_TOKEN, ASSETS_SHEET_ID, TASKS_SHEET_ID } = require('./lib/fe
 const { nonEmptyString, parseAssetCell } = require('./lib/feishu-cells');
 const { buildBlacklistFromHistoryRows, pickUniqueCombo } = require('./lib/feishu-unique-combo');
 
+/** start:all 时只跑指定大类/款式；不配置则行为与原先一致（全部款式） */
+function parseOnlyStylesFromEnv(key) {
+    const raw = (process.env[key] || '').trim();
+    if (!raw) return new Set();
+    return new Set(raw.split(/[,，]/).map((s) => s.trim()).filter(Boolean));
+}
+
 async function startBrain() {
     console.log('🧠 [SPU+SKU 终极繁衍中枢 V4.0] 唤醒！正在同步二维飞书数据...');
+
+    const brainOnlyCategory = (process.env.BRAIN_ONLY_CATEGORY || '').trim() || null;
+    const brainOnlyStyleSet = parseOnlyStylesFromEnv('BRAIN_ONLY_STYLE');
+    if (brainOnlyCategory || brainOnlyStyleSet.size > 0) {
+        console.log(
+            `   🎯 BRAIN_ONLY：大类=${brainOnlyCategory || '（未限定）'} 款式=${brainOnlyStyleSet.size ? [...brainOnlyStyleSet].join(' | ') : '（未限定）'}`
+        );
+    }
 
     try {
         // 读取 A-G 列 (A 大类, B 款式, C 类型, D 素材文件, E 链接/附件, F/G 权重)
@@ -65,10 +80,18 @@ async function startBrain() {
         const newTasks = [];
 
         for (const [category, stylesObj] of Object.entries(catalog)) {
+            if (brainOnlyCategory && String(category).trim() !== brainOnlyCategory) {
+                continue;
+            }
+
             const genericPool = stylesObj['通用'] || { hooks: [], pains: [], proofs: [], benefits: [], ctas: [] };
 
             for (const [style, specificPool] of Object.entries(stylesObj)) {
                 if (style === '通用') continue; // 专属防守：通用本身不单独生成视频
+
+                if (brainOnlyStyleSet.size > 0 && !brainOnlyStyleSet.has(String(style).trim())) {
+                    continue;
+                }
 
                 console.log(`\n📦 正在处理款式: [${category}] -> [${style}]`);
 

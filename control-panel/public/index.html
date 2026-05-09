@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>气象引擎 · 本地控制台</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --ok: #3fb950;
+      --warn: #d29922;
+      --err: #f85149;
+      --border: #30363d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    header h1 { margin: 0; font-size: 1.15rem; font-weight: 600; }
+    header p { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.85rem; }
+    main {
+      max-width: min(96vw, 1480px);
+      margin: 0 auto;
+      padding: 1.25rem;
+    }
+    .layout-body {
+      display: grid;
+      grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
+      gap: 1rem;
+      align-items: start;
+    }
+    .browse-col section {
+      margin-bottom: 0;
+      position: sticky;
+      top: 1rem;
+    }
+    .main-col section:last-child {
+      margin-bottom: 0;
+    }
+    @media (max-width: 960px) {
+      .layout-body {
+        grid-template-columns: 1fr;
+      }
+      .browse-col section {
+        position: static;
+      }
+      .main-col {
+        order: -1;
+      }
+    }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.15rem;
+      margin-bottom: 1rem;
+    }
+    section h2 {
+      margin: 0 0 0.75rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
+    label.mode {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      cursor: pointer;
+      padding: 0.5rem 0.85rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+    }
+    label.mode:has(input:checked) {
+      border-color: var(--accent);
+      background: rgba(88, 166, 255, 0.12);
+    }
+    button, select {
+      font: inherit;
+      padding: 0.45rem 0.85rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      cursor: pointer;
+    }
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .msg { margin-top: 0.75rem; font-size: 0.88rem; }
+    .msg.ok { color: var(--ok); }
+    .msg.err { color: var(--err); }
+    .breadcrumb {
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-bottom: 0.5rem;
+      word-break: break-all;
+    }
+    .breadcrumb a { color: var(--accent); text-decoration: none; }
+    .breadcrumb a:hover { text-decoration: underline; }
+    ul.files {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      max-height: min(52vh, 480px);
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    ul.files li {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.4rem 0.65rem;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.88rem;
+    }
+    ul.files li:last-child { border-bottom: none; }
+    ul.files li:hover { background: rgba(255,255,255,0.04); }
+    .name { cursor: pointer; color: var(--accent); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .name.folder { color: var(--warn); }
+    .meta { color: var(--muted); font-size: 0.78rem; white-space: nowrap; }
+    .preview {
+      margin-top: 0.75rem;
+      padding: 0.75rem;
+      background: var(--bg);
+      border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+    .preview video, .preview audio { max-width: 100%; vertical-align: middle; }
+    pre.run-out {
+      margin: 0.75rem 0 0;
+      padding: 0.75rem;
+      background: #010409;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      overflow: auto;
+      max-height: 240px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .hint { color: var(--muted); font-size: 0.8rem; margin-top: 0.5rem; }
+    .filter-grid {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    }
+    .filter-block {
+      padding: 0.85rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+    }
+    .filter-block h3 {
+      margin: 0 0 0.65rem;
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+    label.filter-toggle {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      cursor: pointer;
+      margin-bottom: 0.65rem;
+      font-size: 0.9rem;
+    }
+    .field {
+      margin-bottom: 0.55rem;
+    }
+    .field label { display: block; font-size: 0.78rem; color: var(--muted); margin-bottom: 0.2rem; }
+    .field input[type="text"] {
+      width: 100%;
+      padding: 0.4rem 0.5rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+    }
+    .field input[type="text"]:disabled { opacity: 0.45; cursor: not-allowed; }
+    select.filter-cat {
+      width: 100%;
+      max-width: 100%;
+    }
+    select.filter-style-multi {
+      width: 100%;
+      min-height: 6.5rem;
+      padding: 0.35rem 0.5rem;
+    }
+    kbd {
+      font-size: 0.82em;
+      padding: 0.08em 0.35em;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--bg);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>气象驱动分发引擎 · 本地控制台</h1>
+    <p>仅监听本机；成片模式与筛选条件会写入项目根目录 <code>.env</code>（脚本下次启动时生效；已在跑的终端需重启）</p>
+  </header>
+  <main>
+    <div class="layout-body">
+      <aside class="browse-col">
+        <section>
+          <h2>目录浏览</h2>
+          <div class="row">
+            <label>根目录
+              <select id="root-select"></select>
+            </label>
+            <button type="button" id="refresh-list">刷新</button>
+          </div>
+          <div class="row" style="margin-top: 0.75rem;">
+            <label>批量上传至<strong>当前路径</strong>
+              <input type="file" id="upload-input" multiple accept="video/*,audio/*,.mp4,.mov,.mkv,.webm,.mp3,.wav,.m4a" style="max-width:240px" />
+            </label>
+            <button type="button" class="primary" id="upload-btn">开始上传</button>
+          </div>
+          <div class="row" style="margin-top: 0.5rem;">
+            <label style="flex:1; min-width:160px;">可选子路径（优先于下方面包屑；正斜杠，如 <code>防晒冰袖/儿童款</code>）
+              <input type="text" id="upload-subpath" placeholder="留空则用当前浏览路径" style="width:100%; margin-top:0.25rem; padding:0.35rem 0.5rem; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text);" />
+            </label>
+          </div>
+          <p class="hint">根目录在上方下拉框选择；上传目录 = 当前面包屑，或填写「可选子路径」（会按需自动建文件夹）。同名会覆盖。</p>
+          <div class="msg" id="upload-msg"></div>
+          <div class="breadcrumb" id="bc"></div>
+          <ul class="files" id="file-list"></ul>
+          <div class="preview" id="preview" hidden>
+            <div id="preview-label"></div>
+            <div id="preview-body"></div>
+          </div>
+        </section>
+      </aside>
+
+      <div class="main-col">
+        <section>
+          <h2>成片模式（口播 / 纯混剪）</h2>
+          <div class="row" id="mode-row">
+            <label class="mode"><input type="radio" name="renderMode" value="full" /> 完整模式（口播 + BGM + 字幕）</label>
+            <label class="mode"><input type="radio" name="renderMode" value="clips_only" /> 纯混剪（保留素材原声，无口播/BGM）</label>
+            <button type="button" class="primary" id="save-mode">保存到 .env</button>
+          </div>
+          <p class="hint" id="env-hint"></p>
+          <div class="msg" id="mode-msg"></div>
+        </section>
+
+        <section>
+          <h2>仅跑指定大类 / 款式</h2>
+          <p class="hint">下拉选项来自本地 <code>assets/</code> 下两级目录（一级 = 大类，二级 = 款式），与素材库结构一致。款式支持按住 <kbd>Ctrl</kbd>（Mac：<kbd>⌘</kbd>）多选。若 <code>.env</code> 中已有值但磁盘上暂无对应文件夹，加载时仍会出现在下拉中。取消勾选「启用限定」并保存可从 <code>.env</code> 移除对应变量。</p>
+          <div class="filter-grid">
+            <div class="filter-block">
+              <h3>繁衍 · brain-engine / start:all</h3>
+              <label class="filter-toggle"><input type="checkbox" id="brain-filter-on" /> 启用限定（写入 BRAIN_ONLY_*）</label>
+              <div class="field">
+                <label for="brain-only-category">大类</label>
+                <select id="brain-only-category" class="filter-cat"></select>
+              </div>
+              <div class="field">
+                <label for="brain-only-style">款式（多选）</label>
+                <select id="brain-only-style" class="filter-style-multi" multiple></select>
+              </div>
+            </div>
+            <div class="filter-block">
+              <h3>混剪 · feishu-engine</h3>
+              <label class="filter-toggle"><input type="checkbox" id="feishu-filter-on" /> 启用限定（写入 FEISHU_ONLY_*）</label>
+              <div class="field">
+                <label for="feishu-only-category">大类</label>
+                <select id="feishu-only-category" class="filter-cat"></select>
+              </div>
+              <div class="field">
+                <label for="feishu-only-style">款式（多选）</label>
+                <select id="feishu-only-style" class="filter-style-multi" multiple></select>
+              </div>
+            </div>
+          </div>
+          <div class="row" style="margin-top: 0.85rem;">
+            <button type="button" class="primary" id="save-filter">保存筛选到 .env</button>
+            <button type="button" id="refresh-asset-catalog">重新扫描 assets</button>
+          </div>
+          <div class="msg" id="filter-msg"></div>
+        </section>
+
+        <section>
+          <h2>运行脚本</h2>
+          <div class="row">
+            <select id="run-script">
+              <option value="start:all">全线流水线 start-all</option>
+              <option value="feishu:v3">矩阵混剪 feishu-engine</option>
+              <option value="brain">繁衍中枢 brain-engine</option>
+              <option value="evolution">达尔文进化 evolution-engine</option>
+            </select>
+            <button type="button" class="primary" id="run-btn">执行</button>
+          </div>
+          <p class="hint">执行时间较长（含 FFmpeg、start-all 全线）时请耐心等待；日志为截断后的末尾输出（约 512KB）。</p>
+          <pre class="run-out" id="run-out" hidden></pre>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const state = { root: 'assets', path: '' };
+    let assetCatalog = {};
+
+    async function api(path, opt) {
+      const r = await fetch(path, opt);
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || r.statusText);
+      return data;
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+    }
+    function escapeAttr(s) {
+      return String(s).replace(/"/g, '&quot;');
+    }
+
+    function splitComma(s) {
+      return String(s || '')
+        .split(/[,，]/)
+        .map((x) => x.trim())
+        .filter(Boolean);
+    }
+
+    async function refreshAssetCatalog() {
+      const d = await api('/api/asset-catalog');
+      assetCatalog = d.catalog && typeof d.catalog === 'object' ? d.catalog : {};
+    }
+
+    function fillCategorySelect(sel, selectedValue) {
+      const keys = Object.keys(assetCatalog).sort((a, b) => a.localeCompare(b, 'zh-CN'));
+      const selVal = (selectedValue || '').trim();
+      if (selVal && !keys.includes(selVal)) {
+        keys.push(selVal);
+        keys.sort((a, b) => a.localeCompare(b, 'zh-CN'));
+      }
+      sel.innerHTML =
+        '<option value="">— 选择大类 —</option>' +
+        keys.map((k) => `<option value="${escapeAttr(k)}">${escapeHtml(k)}</option>`).join('');
+      sel.value = selVal && [...sel.options].some((o) => o.value === selVal) ? selVal : '';
+    }
+
+    function rebuildStyleMulti(sel, categoryKey, savedCsv) {
+      const saved = splitComma(savedCsv);
+      const fromAssets = categoryKey && assetCatalog[categoryKey] ? [...assetCatalog[categoryKey]] : [];
+      const all = new Set([...fromAssets, ...saved]);
+      const list = [...all].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+      sel.innerHTML = list
+        .map((st) => `<option value="${escapeAttr(st)}">${escapeHtml(st)}</option>`)
+        .join('');
+      saved.forEach((st) => {
+        const o = Array.from(sel.options).find((x) => x.value === st);
+        if (o) o.selected = true;
+      });
+    }
+
+    function getStyleCsv(sel) {
+      return Array.from(sel.selectedOptions)
+        .map((o) => o.value)
+        .filter(Boolean)
+        .join(',');
+    }
+
+    function applyFilterFromSettings(s) {
+      const bCat = document.getElementById('brain-only-category');
+      const bSt = document.getElementById('brain-only-style');
+      const fCat = document.getElementById('feishu-only-category');
+      const fSt = document.getElementById('feishu-only-style');
+      fillCategorySelect(bCat, s.brainOnlyCategory || '');
+      rebuildStyleMulti(bSt, bCat.value, s.brainOnlyStyle || '');
+      fillCategorySelect(fCat, s.feishuOnlyCategory || '');
+      rebuildStyleMulti(fSt, fCat.value, s.feishuOnlyStyle || '');
+    }
+
+    function syncFilterInputsDisabled() {
+      const bOn = document.getElementById('brain-filter-on').checked;
+      const fOn = document.getElementById('feishu-filter-on').checked;
+      document.getElementById('brain-only-category').disabled = !bOn;
+      document.getElementById('brain-only-style').disabled = !bOn;
+      document.getElementById('feishu-only-category').disabled = !fOn;
+      document.getElementById('feishu-only-style').disabled = !fOn;
+    }
+
+    async function loadSettings() {
+      const [s] = await Promise.all([api('/api/settings'), refreshAssetCatalog().catch(() => { assetCatalog = {}; })]);
+      document.querySelectorAll('input[name="renderMode"]').forEach((el) => {
+        el.checked = el.value === s.renderMode;
+      });
+      const rootSel = document.getElementById('root-select');
+      rootSel.innerHTML = (s.roots || ['assets']).map((k) => `<option value="${k}">${k}</option>`).join('');
+      rootSel.value = state.root;
+      document.getElementById('env-hint').textContent = s.envExists
+        ? '已读取 .env'
+        : '未找到 .env，保存前请先创建并填写飞书等配置';
+
+      document.getElementById('brain-filter-on').checked = !!s.brainFilterEnabled;
+      document.getElementById('feishu-filter-on').checked = !!s.feishuFilterEnabled;
+      applyFilterFromSettings(s);
+      syncFilterInputsDisabled();
+    }
+
+    document.getElementById('save-mode').addEventListener('click', async () => {
+      const msg = document.getElementById('mode-msg');
+      msg.textContent = '';
+      msg.className = 'msg';
+      const el = document.querySelector('input[name="renderMode"]:checked');
+      if (!el) return;
+      try {
+        await api('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ renderMode: el.value })
+        });
+        msg.textContent = '已保存：RENDER_MODE=' + el.value;
+        msg.classList.add('ok');
+      } catch (e) {
+        msg.textContent = e.message || String(e);
+        msg.classList.add('err');
+      }
+    });
+
+    document.getElementById('brain-filter-on').addEventListener('change', syncFilterInputsDisabled);
+    document.getElementById('feishu-filter-on').addEventListener('change', syncFilterInputsDisabled);
+
+    document.getElementById('brain-only-category').addEventListener('change', () => {
+      const bCat = document.getElementById('brain-only-category').value;
+      rebuildStyleMulti(document.getElementById('brain-only-style'), bCat, '');
+    });
+    document.getElementById('feishu-only-category').addEventListener('change', () => {
+      const fCat = document.getElementById('feishu-only-category').value;
+      rebuildStyleMulti(document.getElementById('feishu-only-style'), fCat, '');
+    });
+
+    document.getElementById('refresh-asset-catalog').addEventListener('click', async () => {
+      const msg = document.getElementById('filter-msg');
+      msg.textContent = '';
+      msg.className = 'msg';
+      try {
+        await refreshAssetCatalog();
+        applyFilterFromSettings({
+          brainOnlyCategory: document.getElementById('brain-only-category').value,
+          brainOnlyStyle: getStyleCsv(document.getElementById('brain-only-style')),
+          feishuOnlyCategory: document.getElementById('feishu-only-category').value,
+          feishuOnlyStyle: getStyleCsv(document.getElementById('feishu-only-style'))
+        });
+        syncFilterInputsDisabled();
+        msg.textContent = '已根据磁盘重新扫描 assets/ 目录结构';
+        msg.classList.add('ok');
+      } catch (e) {
+        msg.textContent = e.message || String(e);
+        msg.classList.add('err');
+      }
+    });
+
+    document.getElementById('save-filter').addEventListener('click', async () => {
+      const msg = document.getElementById('filter-msg');
+      msg.textContent = '';
+      msg.className = 'msg';
+      const brainOn = document.getElementById('brain-filter-on').checked;
+      const feishuOn = document.getElementById('feishu-filter-on').checked;
+      if (brainOn) {
+        const c = (document.getElementById('brain-only-category').value || '').trim();
+        const st = getStyleCsv(document.getElementById('brain-only-style'));
+        if (!c && !st) {
+          msg.textContent = '已勾选「繁衍限定」时请至少选择大类或款式其一，或取消勾选后保存以清除变量。';
+          msg.classList.add('err');
+          return;
+        }
+      }
+      if (feishuOn) {
+        const c = (document.getElementById('feishu-only-category').value || '').trim();
+        const st = getStyleCsv(document.getElementById('feishu-only-style'));
+        if (!c && !st) {
+          msg.textContent = '已勾选「混剪限定」时请至少选择大类或款式其一，或取消勾选后保存以清除变量。';
+          msg.classList.add('err');
+          return;
+        }
+      }
+      try {
+        const data = await api('/api/filter-settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            brainFilterEnabled: brainOn,
+            brainOnlyCategory: document.getElementById('brain-only-category').value,
+            brainOnlyStyle: getStyleCsv(document.getElementById('brain-only-style')),
+            feishuFilterEnabled: feishuOn,
+            feishuOnlyCategory: document.getElementById('feishu-only-category').value,
+            feishuOnlyStyle: getStyleCsv(document.getElementById('feishu-only-style'))
+          })
+        });
+        document.getElementById('brain-filter-on').checked = !!data.brainFilterEnabled;
+        document.getElementById('feishu-filter-on').checked = !!data.feishuFilterEnabled;
+        applyFilterFromSettings(data);
+        syncFilterInputsDisabled();
+        msg.textContent = '已写入 .env（繁衍 / 混剪筛选）';
+        msg.classList.add('ok');
+      } catch (e) {
+        msg.textContent = e.message || String(e);
+        msg.classList.add('err');
+      }
+    });
+
+    function crumbHtml(root, rel) {
+      const parts = rel ? rel.split('/').filter(Boolean) : [];
+      let acc = '';
+      let html = `<a href="#" data-crumb="">根</a>`;
+      for (const p of parts) {
+        acc += (acc ? '/' : '') + p;
+        const here = acc;
+        html += ` / <a href="#" data-crumb="${here}">${p}</a>`;
+      }
+      return `<strong>${root}</strong> / ${html}`;
+    }
+
+    async function browse() {
+      const q = new URLSearchParams({ root: state.root, path: state.path });
+      const data = await api('/api/browse?' + q.toString());
+      document.getElementById('bc').innerHTML = crumbHtml(data.root, data.path);
+      const ul = document.getElementById('file-list');
+      ul.innerHTML = data.items.map((it) => {
+        const sz = it.isDirectory ? '目录' : formatSize(it.size);
+        const cls = it.isDirectory ? 'name folder' : 'name';
+        return `<li><span class="${cls}" data-name="${escapeAttr(it.name)}" data-dir="${it.isDirectory}">${escapeHtml(it.name)}</span><span class="meta">${sz}</span></li>`;
+      }).join('');
+
+      ul.querySelectorAll('.name').forEach((el) => {
+        el.addEventListener('click', () => {
+          const name = el.getAttribute('data-name');
+          const isDir = el.getAttribute('data-dir') === 'true';
+          if (isDir) {
+            state.path = data.path ? data.path + '/' + name : name;
+            browse();
+            hidePreview();
+          } else {
+            showPreview(data.root, data.path ? data.path + '/' + name : name, name);
+          }
+        });
+      });
+
+      document.getElementById('bc').querySelectorAll('[data-crumb]').forEach((a) => {
+        a.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          state.path = a.getAttribute('data-crumb') || '';
+          browse();
+          hidePreview();
+        });
+      });
+    }
+
+    function hidePreview() {
+      const pv = document.getElementById('preview');
+      pv.hidden = true;
+      document.getElementById('preview-body').innerHTML = '';
+    }
+
+    function showPreview(root, relPath, label) {
+      const ext = label.split('.').pop().toLowerCase();
+      const url = '/api/file?' + new URLSearchParams({ root, path: relPath }).toString();
+      const body = document.getElementById('preview-body');
+      document.getElementById('preview-label').textContent = label;
+      if (['mp4', 'webm'].includes(ext)) {
+        body.innerHTML = `<video src="${url}" controls style="max-height:320px"></video>`;
+      } else if (['mp3', 'wav'].includes(ext)) {
+        body.innerHTML = `<audio src="${url}" controls></audio>`;
+      } else if (['jpg', 'jpeg', 'png', 'gif'].includes(ext)) {
+        body.innerHTML = `<img src="${url}" alt="" style="max-height:280px" />`;
+      } else {
+        body.innerHTML = `<a href="${url}" target="_blank" rel="noopener">下载 / 打开文件</a>`;
+      }
+      document.getElementById('preview').hidden = false;
+    }
+
+    function formatSize(n) {
+      if (n == null) return '';
+      if (n < 1024) return n + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+      return (n / 1024 / 1024).toFixed(1) + ' MB';
+    }
+
+    document.getElementById('root-select').addEventListener('change', () => {
+      state.root = document.getElementById('root-select').value;
+      state.path = '';
+      browse();
+      hidePreview();
+    });
+    document.getElementById('refresh-list').addEventListener('click', () => browse());
+
+    document.getElementById('upload-btn').addEventListener('click', async () => {
+      const input = document.getElementById('upload-input');
+      const msg = document.getElementById('upload-msg');
+      msg.textContent = '';
+      msg.className = 'msg';
+      if (!input.files || input.files.length === 0) {
+        msg.textContent = '请先选择文件';
+        msg.classList.add('err');
+        return;
+      }
+      const fd = new FormData();
+      fd.append('root', state.root);
+      const manualSub = (document.getElementById('upload-subpath').value || '').trim().replace(/\\/g, '/');
+      fd.append('path', manualSub || (state.path || ''));
+      for (let i = 0; i < input.files.length; i++) {
+        fd.append('files', input.files[i]);
+      }
+      const btn = document.getElementById('upload-btn');
+      btn.disabled = true;
+      try {
+        const r = await fetch('/api/upload', { method: 'POST', body: fd });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || r.statusText);
+        msg.textContent = `已上传 ${data.count} 个文件`;
+        msg.classList.add('ok');
+        input.value = '';
+        browse();
+      } catch (e) {
+        msg.textContent = e.message || String(e);
+        msg.classList.add('err');
+      }
+      btn.disabled = false;
+    });
+
+    document.getElementById('run-btn').addEventListener('click', async () => {
+      const key = document.getElementById('run-script').value;
+      const out = document.getElementById('run-out');
+      out.hidden = false;
+      out.textContent = '运行中…';
+      document.getElementById('run-btn').disabled = true;
+      try {
+        const data = await api('/api/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ script: key })
+        });
+        out.textContent = (data.ok ? '[成功] ' : '[退出码 ' + data.exitCode + '] ') + (data.label || '') + '\n\n' + (data.output || '');
+      } catch (e) {
+        out.textContent = e.message || String(e);
+      }
+      document.getElementById('run-btn').disabled = false;
+    });
+
+    loadSettings().then(() => browse()).catch((e) => {
+      document.getElementById('mode-msg').textContent = '加载失败: ' + (e.message || e);
+      document.getElementById('mode-msg').className = 'msg err';
+    });
+  </script>
+</body>
+</html>
